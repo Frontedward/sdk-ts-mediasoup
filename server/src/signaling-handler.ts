@@ -13,8 +13,17 @@ import {
   PauseMessage,
   JoinMessage,
   LeaveMessage,
-  JoinResponse
+  JoinResponse,
+  ConnectTransportMessage
 } from './types';
+
+type IceSelectedTuple = {
+  localIp: string;
+  localPort: number;
+  remoteIp: string;
+  remotePort: number;
+  protocol: 'udp' | 'tcp';
+};
 
 /**
  * Обработчик сигналинг-сообщений
@@ -38,6 +47,12 @@ export class SignalingHandler {
    */
   async handleMessage(socket: Socket, message: SignalingMessageUnion): Promise<void> {
     try {
+      logger.info('Received message:', {
+        type: message.type,
+        socketId: socket.id,
+        message: JSON.stringify(message, null, 2)
+      });
+      
       switch (message.type) {
         case SignalingMessageType.JOIN:
           await this.handleJoinMessage(socket, message);
@@ -46,6 +61,10 @@ export class SignalingHandler {
           await this.handleLeaveMessage(socket, message);
           break;
         case SignalingMessageType.TRANSPORT_CONNECT:
+          logger.info('Handling TRANSPORT_CONNECT:', {
+            transportId: (message as TransportConnectMessage).transportId,
+            dtlsParameters: (message as TransportConnectMessage).dtlsParameters
+          });
           await this.handleTransportConnectMessage(socket, message as TransportConnectMessage);
           break;
         case SignalingMessageType.TRANSPORT_PRODUCE:
@@ -64,7 +83,11 @@ export class SignalingHandler {
           logger.warn('Unknown message type:', message.type);
       }
     } catch (error) {
-      logger.error('Error handling message:', error);
+      logger.error('Error handling message:', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined,
+        message: JSON.stringify(message, null, 2)
+      });
       socket.emit('message', {
         type: SignalingMessageType.ERROR,
         error: error instanceof Error ? error.message : 'Unknown error'
@@ -90,46 +113,46 @@ export class SignalingHandler {
   async handleJoinMessage(socket: Socket, message: JoinMessage): Promise<void> {
     try {
       // Создаем WebRTC транспорты для отправки и получения
-      const sendTransport = await this.mediasoupManager.createWebRtcTransport();
-      const recvTransport = await this.mediasoupManager.createWebRtcTransport();
+      const { transport: sendTransport, params: sendParams } = await this.mediasoupManager.createWebRtcTransport();
+      const { transport: recvTransport, params: recvParams } = await this.mediasoupManager.createWebRtcTransport();
       
-      this.transports.set(sendTransport.id, sendTransport);
-      this.transports.set(recvTransport.id, recvTransport);
+      this.transports.set(sendParams.id, sendTransport);
+      this.transports.set(recvParams.id, recvTransport);
 
       // Получаем возможности роутера
-      const router = this.mediasoupManager.getRouter();
+      const rtpCapabilities = this.mediasoupManager.getRouterRtpCapabilities();
       
       // Отправляем информацию о транспортах клиенту
       const response: JoinResponse = {
         type: SignalingMessageType.JOIN,
         sendTransportOptions: {
-          id: sendTransport.id,
-          iceParameters: sendTransport.iceParameters,
-          iceCandidates: sendTransport.iceCandidates,
-          dtlsParameters: sendTransport.dtlsParameters
+          id: sendParams.id,
+          iceParameters: sendParams.iceParameters,
+          iceCandidates: sendParams.iceCandidates,
+          dtlsParameters: sendParams.dtlsParameters
         },
         recvTransportOptions: {
-          id: recvTransport.id,
-          iceParameters: recvTransport.iceParameters,
-          iceCandidates: recvTransport.iceCandidates,
-          dtlsParameters: recvTransport.dtlsParameters
+          id: recvParams.id,
+          iceParameters: recvParams.iceParameters,
+          iceCandidates: recvParams.iceCandidates,
+          dtlsParameters: recvParams.dtlsParameters
         },
-        rtpCapabilities: router.rtpCapabilities,
+        rtpCapabilities,
         userId: message.userId,
         roomId: message.roomId,
         displayName: message.displayName
       };
 
       logger.info('Отправляем JOIN response:', {
-        sendTransportId: sendTransport.id,
-        recvTransportId: recvTransport.id,
+        sendTransportId: sendParams.id,
+        recvTransportId: recvParams.id,
         iceParameters: {
-          send: sendTransport.iceParameters,
-          recv: recvTransport.iceParameters
+          send: sendParams.iceParameters,
+          recv: recvParams.iceParameters
         },
         iceCandidates: {
-          send: sendTransport.iceCandidates.length,
-          recv: recvTransport.iceCandidates.length
+          send: sendParams.iceCandidates.length,
+          recv: recvParams.iceCandidates.length
         }
       });
 
@@ -137,31 +160,33 @@ export class SignalingHandler {
       logger.info('Client joined:', message.userId);
 
       // Настраиваем обработчики событий для send транспорта
-      sendTransport.on('dtlsstatechange', (dtlsState) => {
-        logger.info('Send transport dtls state changed to', dtlsState);
+      sendTransport.on('connect' as any, ({ dtlsParameters }: { dtlsParameters: mediasoupTypes.DtlsParameters }, callback: () => void, errback: (error: Error) => void) => {
+        logger.info('Send transport connect event with parameters:', dtlsParameters);
+        callback();
       });
 
-      sendTransport.on('iceselectedtuplechange', (iceSelectedTuple) => {
-        logger.info('Send transport ice selected tuple changed:', iceSelectedTuple);
+      sendTransport.on('connectionstatechange' as any, (state: string) => {
+        logger.info('Send transport connection state changed to:', state);
       });
 
       sendTransport.observer.on('close', () => {
         logger.info('Send transport closed');
-        this.transports.delete(sendTransport.id);
+        this.transports.delete(sendParams.id);
       });
 
       // Настраиваем обработчики событий для receive транспорта
-      recvTransport.on('dtlsstatechange', (dtlsState) => {
-        logger.info('Receive transport dtls state changed to', dtlsState);
+      recvTransport.on('connect' as any, ({ dtlsParameters }: { dtlsParameters: mediasoupTypes.DtlsParameters }, callback: () => void, errback: (error: Error) => void) => {
+        logger.info('Receive transport connect event with parameters:', dtlsParameters);
+        callback();
       });
 
-      recvTransport.on('iceselectedtuplechange', (iceSelectedTuple) => {
-        logger.info('Receive transport ice selected tuple changed:', iceSelectedTuple);
+      recvTransport.on('connectionstatechange' as any, (state: string) => {
+        logger.info('Receive transport connection state changed to:', state);
       });
 
       recvTransport.observer.on('close', () => {
         logger.info('Receive transport closed');
-        this.transports.delete(recvTransport.id);
+        this.transports.delete(recvParams.id);
       });
 
     } catch (error) {
@@ -186,25 +211,46 @@ export class SignalingHandler {
    * Обработка сообщения о подключении транспорта
    */
   async handleTransportConnectMessage(socket: Socket, message: TransportConnectMessage): Promise<void> {
-    const transport = this.transports.get(message.transportId);
-    if (!transport) {
-      throw new Error(`Transport not found: ${message.transportId}`);
-    }
-
     try {
-      logger.info('Connecting transport:', message.transportId);
-      await transport.connect({ dtlsParameters: message.dtlsParameters });
-      
-      // Отправляем подтверждение подключения
-      socket.emit('message', {
-        type: SignalingMessageType.CONNECT_TRANSPORT,
+      logger.info('Handling TRANSPORT_CONNECT message:', {
+        socketId: socket.id,
         transportId: message.transportId,
         dtlsParameters: message.dtlsParameters
       });
-      
-      logger.info('Transport connected successfully:', message.transportId);
+
+      const transport = this.transports.get(message.transportId);
+      if (!transport) {
+        const error = `Transport not found: ${message.transportId}`;
+        logger.error(error);
+        throw new Error(error);
+      }
+
+      // Проверяем DTLS параметры
+      if (!message.dtlsParameters || !message.dtlsParameters.fingerprints || !message.dtlsParameters.role) {
+        const error = 'Invalid DTLS parameters';
+        logger.error(error, message.dtlsParameters);
+        throw new Error(error);
+      }
+
+      // Подключаем транспорт
+      await this.mediasoupManager.connectTransport(transport, message.dtlsParameters);
+
+      // Отправляем подтверждение
+      const response: ConnectTransportMessage = {
+        type: SignalingMessageType.CONNECT_TRANSPORT,
+        transportId: message.transportId,
+        dtlsParameters: message.dtlsParameters
+      };
+
+      logger.info('Sending CONNECT_TRANSPORT response:', response);
+      socket.send(response);
+
     } catch (error) {
-      logger.error('Error connecting transport:', error);
+      logger.error('Error in handleTransportConnectMessage:', error);
+      socket.send({
+        type: SignalingMessageType.ERROR,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
       throw error;
     }
   }

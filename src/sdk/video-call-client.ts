@@ -1,4 +1,5 @@
 import * as mediasoupClient from 'mediasoup-client';
+import { types as mediasoupTypes } from 'mediasoup-client';
 import { AsyncEventQueue } from './events/event-queue';
 import { SimpleEventEmitter } from './events/typed-event-emitter';
 import { DeviceManager } from './media/device-manager';
@@ -18,7 +19,8 @@ import {
   UserId,
   VideoCallError,
   JoinMessage,
-  JoinResponse
+  JoinResponse,
+  TransportConnectMessage
 } from './types';
 
 /**
@@ -53,11 +55,11 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
   private signalingChannel: SignalingChannel;
   private deviceManager: DeviceManager;
   private eventQueue: AsyncEventQueue;
-  private device: mediasoupClient.Device;
-  private sendTransport: mediasoupClient.types.Transport | null = null;
-  private recvTransport: mediasoupClient.types.Transport | null = null;
-  private producers: Map<ProducerId, mediasoupClient.types.Producer> = new Map();
-  private consumers: Map<ConsumerId, mediasoupClient.types.Consumer> = new Map();
+  private device?: mediasoupClient.Device;
+  private sendTransport?: mediasoupTypes.Transport;
+  private receiveTransport?: mediasoupTypes.Transport;
+  private producers: Map<ProducerId, mediasoupTypes.Producer> = new Map();
+  private consumers: Map<ConsumerId, mediasoupTypes.Consumer> = new Map();
   private connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED;
   private currentRoom: Room | null = null;
   private currentUserId: UserId | null = null;
@@ -87,7 +89,6 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
     
     this.deviceManager = new DeviceManager();
     this.eventQueue = new AsyncEventQueue();
-    this.device = new mediasoupClient.Device();
     
     this.setupSignalingListeners();
   }
@@ -131,7 +132,7 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
           console.error('Таймаут подключения. Send transport state:', this.sendTransport?.connectionState);
-          console.error('Receive transport state:', this.recvTransport?.connectionState);
+          console.error('Receive transport state:', this.receiveTransport?.connectionState);
           reject(new VideoCallError('Timeout joining call', ErrorType.CONNECTION));
         }, 30000); // Увеличиваем таймаут до 30 секунд
         
@@ -406,6 +407,7 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
       try {
         // Load mediasoup device with router capabilities
         console.log('Загрузка устройства с возможностями:', joinResponse.rtpCapabilities);
+        this.device = new mediasoupClient.Device();
         await this.device.load({ 
           routerRtpCapabilities: joinResponse.rtpCapabilities 
         });
@@ -413,56 +415,92 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
         // Create send transport
         console.log('Создание send транспорта с параметрами:', joinResponse.sendTransportOptions);
         this.sendTransport = this.device.createSendTransport({
-          ...joinResponse.sendTransportOptions,
-          iceServers: [],
+          id: joinResponse.sendTransportOptions.id,
+          iceParameters: joinResponse.sendTransportOptions.iceParameters,
+          iceCandidates: joinResponse.sendTransportOptions.iceCandidates,
+          dtlsParameters: joinResponse.sendTransportOptions.dtlsParameters,
+          iceServers: [
+            {
+              urls: [
+                'stun:stun1.l.google.com:19302',
+                'stun:stun2.l.google.com:19302',
+                'stun:stun3.l.google.com:19302',
+                'stun:stun4.l.google.com:19302'
+              ]
+            }
+          ],
           iceTransportPolicy: 'all',
           additionalSettings: {
-            encodedInsertableStreams: false,
-            forceEncodedVideoInsertableStreams: false,
-            forceEncodedAudioInsertableStreams: false
+            iceCheckingTimeout: 5000,
+            iceReconnectTimeout: 2000,
+            retries: 3
           }
         });
 
-        // Create receive transport
-        console.log('Создание receive транспорта с параметрами:', joinResponse.recvTransportOptions);
-        this.recvTransport = this.device.createRecvTransport({
-          ...joinResponse.recvTransportOptions,
-          iceServers: [],
-          iceTransportPolicy: 'all',
-          additionalSettings: {
-            encodedInsertableStreams: false,
-            forceEncodedVideoInsertableStreams: false,
-            forceEncodedAudioInsertableStreams: false
-          }
-        });
-
-        // Set up send transport event handlers
-        this.sendTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
+        // Set up send transport event handlers BEFORE using it
+        this.sendTransport.on('connect', async (
+          { dtlsParameters }: { dtlsParameters: mediasoupTypes.DtlsParameters }, 
+          callback: () => void, 
+          errback: (error: Error) => void
+        ) => {
           try {
-            console.log('Send transport connect event с параметрами:', dtlsParameters);
+            console.log('Send transport connect event с параметрами:', {
+              dtlsParameters,
+              transportId: this.sendTransport?.id,
+              connectionState: this.sendTransport?.connectionState,
+              closed: this.sendTransport?.closed
+            });
+
             await new Promise<void>((resolve, reject) => {
               const timeout = setTimeout(() => {
+                console.error('Send transport connect timeout. Current state:', {
+                  connectionState: this.sendTransport?.connectionState,
+                  closed: this.sendTransport?.closed,
+                  dtlsParameters
+                });
                 reject(new Error('Timeout waiting for send transport connect response'));
-              }, 5000);
+              }, 15000);
 
               const messageHandler = (msg: SignalingMessageUnion) => {
+                console.log('Получено сообщение в send transport connect:', {
+                  messageType: msg.type,
+                  expectedType: SignalingMessageType.CONNECT_TRANSPORT,
+                  messageTransportId: msg.type === SignalingMessageType.CONNECT_TRANSPORT ? msg.transportId : undefined,
+                  expectedTransportId: this.sendTransport!.id,
+                  fullMessage: msg
+                });
+                
                 if (msg.type === SignalingMessageType.CONNECT_TRANSPORT && 
                     msg.transportId === this.sendTransport!.id) {
+                  console.log('Получено подтверждение подключения send транспорта:', {
+                    transportId: msg.transportId,
+                    dtlsParameters: msg.dtlsParameters,
+                    connectionState: this.sendTransport?.connectionState
+                  });
                   this.signalingChannel.off('message', messageHandler);
                   clearTimeout(timeout);
                   resolve();
+                } else if (msg.type === SignalingMessageType.ERROR) {
+                  console.error('Получена ошибка при подключении транспорта:', msg);
+                  this.signalingChannel.off('message', messageHandler);
+                  clearTimeout(timeout);
+                  reject(new Error(msg.error));
                 }
               };
 
               this.signalingChannel.on('message', messageHandler);
               
-              this.signalingChannel.send({
+              const transportConnectMessage: TransportConnectMessage = {
                 type: SignalingMessageType.TRANSPORT_CONNECT,
                 transportId: this.sendTransport!.id,
                 dtlsParameters
-              });
-              console.log('Отправлено TRANSPORT_CONNECT для send транспорта');
+              };
+              
+              console.log('Отправка TRANSPORT_CONNECT для send транспорта:', transportConnectMessage);
+              this.signalingChannel.send(transportConnectMessage);
             });
+
+            console.log('Send transport connect успешно завершен');
             callback();
           } catch (error) {
             console.error('Ошибка в send transport connect:', error);
@@ -471,7 +509,27 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
           }
         });
 
-        this.sendTransport.on('produce', async ({ kind, rtpParameters, appData }, callback, errback) => {
+        this.sendTransport.on('connectionstatechange', (state: string) => {
+          console.log('Send transport connection state changed:', {
+            state,
+            transportId: this.sendTransport?.id,
+            closed: this.sendTransport?.closed
+          });
+        });
+
+        this.sendTransport.on('icegatheringstatechange', (state: string) => {
+          console.log('Send transport ICE gathering state changed:', state);
+        });
+
+        (this.sendTransport as any).on('dtlsstatechange', (state: string) => {
+          console.log('Send transport DTLS state changed:', state);
+        });
+
+        this.sendTransport.on('produce', async (
+          { kind, rtpParameters }: { kind: mediasoupTypes.MediaKind, rtpParameters: mediasoupTypes.RtpParameters },
+          callback: (data: { id: string }) => void,
+          errback: (error: Error) => void
+        ) => {
           try {
             console.log('Transport produce event:', { kind, rtpParameters });
             this.signalingChannel.send({
@@ -479,7 +537,7 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
               transportId: this.sendTransport!.id,
               kind,
               rtpParameters,
-              appData
+              appData: { mediaTag: kind }
             });
             console.log('Отправлено TRANSPORT_PRODUCE');
             const producerId = 'producer-' + Math.random().toString(36).substring(2, 15);
@@ -490,33 +548,85 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
           }
         });
 
-        // Set up receive transport event handlers
-        this.recvTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
+        // Create receive transport
+        console.log('Создание receive транспорта с параметрами:', joinResponse.recvTransportOptions);
+        this.receiveTransport = this.device.createRecvTransport({
+          id: joinResponse.recvTransportOptions.id,
+          iceParameters: joinResponse.recvTransportOptions.iceParameters,
+          iceCandidates: joinResponse.recvTransportOptions.iceCandidates,
+          dtlsParameters: joinResponse.recvTransportOptions.dtlsParameters,
+          iceServers: [
+            {
+              urls: [
+                'stun:stun1.l.google.com:19302',
+                'stun:stun2.l.google.com:19302',
+                'stun:stun3.l.google.com:19302',
+                'stun:stun4.l.google.com:19302'
+              ]
+            }
+          ],
+          iceTransportPolicy: 'all',
+          additionalSettings: {
+            iceCheckingTimeout: 5000,
+            iceReconnectTimeout: 2000,
+            retries: 3
+          }
+        });
+
+        // Set up receive transport event handlers BEFORE using it
+        this.receiveTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
           try {
-            console.log('Receive transport connect event с параметрами:', dtlsParameters);
+            console.log('Receive transport connect event с параметрами:', {
+              dtlsParameters,
+              transportId: this.receiveTransport?.id,
+              connectionState: this.receiveTransport?.connectionState,
+              closed: this.receiveTransport?.closed
+            });
+
             await new Promise<void>((resolve, reject) => {
               const timeout = setTimeout(() => {
                 reject(new Error('Timeout waiting for receive transport connect response'));
-              }, 5000);
+              }, 15000);
 
               const messageHandler = (msg: SignalingMessageUnion) => {
+                console.log('Получено сообщение в receive transport connect:', {
+                  messageType: msg.type,
+                  expectedType: SignalingMessageType.CONNECT_TRANSPORT,
+                  messageTransportId: msg.type === SignalingMessageType.CONNECT_TRANSPORT ? msg.transportId : undefined,
+                  expectedTransportId: this.receiveTransport!.id,
+                  fullMessage: msg
+                });
+                
                 if (msg.type === SignalingMessageType.CONNECT_TRANSPORT && 
-                    msg.transportId === this.recvTransport!.id) {
+                    msg.transportId === this.receiveTransport!.id) {
+                  console.log('Получено подтверждение подключения receive транспорта:', {
+                    transportId: msg.transportId,
+                    dtlsParameters: msg.dtlsParameters,
+                    connectionState: this.receiveTransport?.connectionState
+                  });
                   this.signalingChannel.off('message', messageHandler);
                   clearTimeout(timeout);
                   resolve();
+                } else if (msg.type === SignalingMessageType.ERROR) {
+                  console.error('Получена ошибка при подключении транспорта:', msg);
+                  this.signalingChannel.off('message', messageHandler);
+                  clearTimeout(timeout);
+                  reject(new Error(msg.error));
                 }
               };
 
               this.signalingChannel.on('message', messageHandler);
               
-              this.signalingChannel.send({
+              const transportConnectMessage: TransportConnectMessage = {
                 type: SignalingMessageType.TRANSPORT_CONNECT,
-                transportId: this.recvTransport!.id,
+                transportId: this.receiveTransport!.id,
                 dtlsParameters
-              });
-              console.log('Отправлено TRANSPORT_CONNECT для receive транспорта');
+              };
+              
+              console.log('Отправка TRANSPORT_CONNECT для receive транспорта:', transportConnectMessage);
+              this.signalingChannel.send(transportConnectMessage);
             });
+            console.log('Receive transport connect успешно завершен');
             callback();
           } catch (error) {
             console.error('Ошибка в receive transport connect:', error);
@@ -525,29 +635,22 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
           }
         });
 
-        // Set up transport connection state change handlers
-        this.sendTransport.on('connectionstatechange', (state) => {
-          console.log('Send transport connection state changed to:', state);
-          if (state === 'connected') {
-            console.log('Send transport connected successfully');
-            this.setConnectionStatus(ConnectionStatus.CONNECTED);
-          } else if (state === 'failed' || state === 'disconnected' || state === 'closed') {
-            console.error('Send transport connection failed:', state);
-            this.setConnectionStatus(ConnectionStatus.ERROR);
-          }
+          this.receiveTransport.on('connectionstatechange', (state) => {
+          console.log('Receive transport connection state changed:', {
+            state,
+            transportId: this.receiveTransport?.id,
+            closed: this.receiveTransport?.closed
+          });
         });
 
-        this.recvTransport.on('connectionstatechange', (state) => {
-          console.log('Receive transport connection state changed to:', state);
-          if (state === 'connected') {
-            console.log('Receive transport connected successfully');
-            this.setConnectionStatus(ConnectionStatus.CONNECTED);
-          } else if (state === 'failed' || state === 'disconnected' || state === 'closed') {
-            console.error('Receive transport connection failed:', state);
-            this.setConnectionStatus(ConnectionStatus.ERROR);
-          }
+        (this.receiveTransport as any).on('icestatechange', (state: string) => {
+          console.log('Receive transport ICE state changed:', state);
         });
-        
+
+        (this.receiveTransport as any).on('dtlsstatechange', (state: string) => {
+          console.log('Receive transport DTLS state changed:', state);
+        });
+
         // Create producers for local tracks
         const videoTrack = this.deviceManager.getVideoTrack();
         const audioTrack = this.deviceManager.getAudioTrack();
@@ -620,14 +723,19 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
   private async handleNewProducerMessage(
     message: SignalingMessageUnion & { type: SignalingMessageType.NEW_PRODUCER }
   ): Promise<void> {
-    if (!this.currentRoom || !this.recvTransport || message.userId === this.currentUserId) {
+    if (!this.currentRoom || !this.receiveTransport || message.userId === this.currentUserId) {
       return;
     }
 
     // Request to consume this producer
+    if (!this.device) {
+      console.error('Device is not initialized');
+      return;
+    }
+    
     this.signalingChannel.send({
       type: SignalingMessageType.TRANSPORT_CONSUME,
-      transportId: this.recvTransport.id,
+      transportId: this.receiveTransport.id,
       producerId: message.producerId,
       rtpCapabilities: this.device.rtpCapabilities
     });
@@ -661,7 +769,7 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
   private async handleConsumeMessage(
     message: SignalingMessageUnion & { type: SignalingMessageType.CONSUME }
   ): Promise<void> {
-    if (!this.currentRoom || !this.recvTransport) {
+    if (!this.currentRoom || !this.receiveTransport) {
       return;
     }
 
@@ -672,7 +780,7 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
 
     try {
       // Create a consumer
-      const consumer = await this.recvTransport.consume({
+      const consumer = await this.receiveTransport.consume({
         id: message.consumerId,
         producerId: message.producerId,
         kind: message.kind,
@@ -722,10 +830,10 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
     
     // Проверяем статус подключения обоих транспортов
     const sendConnected = this.sendTransport?.connectionState === 'connected';
-    const recvConnected = this.recvTransport?.connectionState === 'connected';
+    const recvConnected = this.receiveTransport?.connectionState === 'connected';
     
     console.log('Send transport state:', this.sendTransport?.connectionState);
-    console.log('Receive transport state:', this.recvTransport?.connectionState);
+    console.log('Receive transport state:', this.receiveTransport?.connectionState);
 
     // Если хотя бы один транспорт подключен, считаем соединение установленным
     if (sendConnected || recvConnected) {
@@ -842,12 +950,12 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
     // Close transports
     if (this.sendTransport) {
       this.sendTransport.close();
-      this.sendTransport = null;
+      this.sendTransport = undefined;
     }
     
-    if (this.recvTransport) {
-      this.recvTransport.close();
-      this.recvTransport = null;
+    if (this.receiveTransport) {
+      this.receiveTransport.close();
+      this.receiveTransport = undefined;
     }
   }
 

@@ -95,14 +95,14 @@ export enum SignalingMessageType {
   LEAVE = 'leave',
   NEW_PRODUCER = 'newProducer',
   PRODUCER_CLOSED = 'producerClosed',
-  TRANSPORT_CONNECT = 'transportConnect',
+  TRANSPORT_CONNECT = 'TRANSPORT_CONNECT',
   TRANSPORT_PRODUCE = 'transportProduce',
   TRANSPORT_CONSUME = 'transportConsume',
-  CONNECT_TRANSPORT = 'connectTransport',
+  CONNECT_TRANSPORT = 'CONNECT_TRANSPORT',
   CONSUME = 'consume',
   RESUME = 'resume',
   PAUSE = 'pause',
-  ERROR = 'error',
+  ERROR = 'error'
 }
 
 /**

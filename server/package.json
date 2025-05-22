@@ -8,7 +8,8 @@
     "mediasoup": "ts-node-dev --respawn --transpile-only src/mediasoup.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "vitest"
+    "test": "vitest",
+    "test:network": "ts-node src/network-test.ts"
   },
   "dependencies": {
     "@types/cors": "^2.8.18",
@@ -16,6 +17,7 @@
     "express": "^4.21.2",
     "mediasoup": "^3.15.8",
     "socket.io": "^4.8.1",
+    "stun": "^2.1.0",
     "winston": "^3.17.0"
   },
   "devDependencies": {
