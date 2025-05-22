@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { observer } from 'mobx-react-lite';
 import { VideoCallClient } from '../sdk/video-call-client';
 import { ConnectionStatus, Participant } from '../sdk/types';
@@ -35,11 +35,11 @@ const ParticipantView: React.FC<{ participant: Participant }> = ({ participant }
 
 // Основной компонент демо
 export const VideoCallDemo: React.FC = observer(() => {
-  const [client] = useState(() => new VideoCallClient({
-    signalingUrl: 'ws://localhost:3000',
+  const client = useMemo(() => new VideoCallClient({
+    signalingUrl: 'ws://localhost:3001',
     autoReconnect: true,
-    useSimulcast: true
-  }));
+    useSimulcast: false
+  }), []);
 
   const [store] = useState(() => new CallStore(client));
   const [roomId, setRoomId] = useState('');
@@ -146,7 +146,7 @@ export const VideoCallDemo: React.FC = observer(() => {
             <video
               ref={(el) => {
                 if (el) {
-                  const videoTrack = store.localVideoTrack;
+                  const videoTrack = client.getDeviceManager().getVideoTrack();
                   if (videoTrack) {
                     el.srcObject = new MediaStream([videoTrack]);
                   }

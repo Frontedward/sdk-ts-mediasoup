@@ -66,7 +66,7 @@ io.on('connection', (socket) => {
 });
 
 // Запуск сервера
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, () => {
   logger.info(`Сервер запущен на порту ${PORT}`);
 }); 

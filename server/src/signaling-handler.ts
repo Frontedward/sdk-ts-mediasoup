@@ -160,13 +160,35 @@ export class SignalingHandler {
       logger.info('Client joined:', message.userId);
 
       // Настраиваем обработчики событий для send транспорта
-      sendTransport.on('connect' as any, ({ dtlsParameters }: { dtlsParameters: mediasoupTypes.DtlsParameters }, callback: () => void, errback: (error: Error) => void) => {
-        logger.info('Send transport connect event with parameters:', dtlsParameters);
-        callback();
+      sendTransport.on('connect' as any, async ({ dtlsParameters }: { dtlsParameters: mediasoupTypes.DtlsParameters }, callback: () => void, errback: (error: Error) => void) => {
+        try {
+          logger.info('Send transport connect event with parameters:', {
+            transportId: sendTransport.id
+          });
+          await this.mediasoupManager.connectTransport(sendTransport, dtlsParameters);
+          logger.info('Send transport connect successful');
+          callback();
+        } catch (error) {
+          logger.error('Error connecting send transport:', error);
+          errback(error as Error);
+        }
       });
 
+      // Логирование всех возможных событий
       sendTransport.on('connectionstatechange' as any, (state: string) => {
         logger.info('Send transport connection state changed to:', state);
+      });
+
+      (sendTransport as any).on('dtlsstatechange', (state: string) => {
+        logger.info('Send transport DTLS state changed to:', state);
+      });
+
+      (sendTransport as any).on('icestatechange', (state: string) => {
+        logger.info('Send transport ICE state changed to:', state);
+      });
+
+      (sendTransport as any).on('iceselectedtuplechange', (tuple: IceSelectedTuple) => {
+        logger.info('Send transport ICE selected tuple changed:', tuple);
       });
 
       sendTransport.observer.on('close', () => {
@@ -175,13 +197,35 @@ export class SignalingHandler {
       });
 
       // Настраиваем обработчики событий для receive транспорта
-      recvTransport.on('connect' as any, ({ dtlsParameters }: { dtlsParameters: mediasoupTypes.DtlsParameters }, callback: () => void, errback: (error: Error) => void) => {
-        logger.info('Receive transport connect event with parameters:', dtlsParameters);
-        callback();
+      recvTransport.on('connect' as any, async ({ dtlsParameters }: { dtlsParameters: mediasoupTypes.DtlsParameters }, callback: () => void, errback: (error: Error) => void) => {
+        try {
+          logger.info('Receive transport connect event with parameters:', {
+            transportId: recvTransport.id
+          });
+          await this.mediasoupManager.connectTransport(recvTransport, dtlsParameters);
+          logger.info('Receive transport connect successful');
+          callback();
+        } catch (error) {
+          logger.error('Error connecting receive transport:', error);
+          errback(error as Error);
+        }
       });
 
+      // Логирование всех возможных событий
       recvTransport.on('connectionstatechange' as any, (state: string) => {
         logger.info('Receive transport connection state changed to:', state);
+      });
+
+      (recvTransport as any).on('dtlsstatechange', (state: string) => {
+        logger.info('Receive transport DTLS state changed to:', state);
+      });
+
+      (recvTransport as any).on('icestatechange', (state: string) => {
+        logger.info('Receive transport ICE state changed to:', state);
+      });
+
+      (recvTransport as any).on('iceselectedtuplechange', (tuple: IceSelectedTuple) => {
+        logger.info('Receive transport ICE selected tuple changed:', tuple);
       });
 
       recvTransport.observer.on('close', () => {
@@ -235,7 +279,7 @@ export class SignalingHandler {
       // Подключаем транспорт
       await this.mediasoupManager.connectTransport(transport, message.dtlsParameters);
 
-      // Отправляем подтверждение
+      // Отправляем подтверждение - критически важно использовать socket.emit вместо socket.send
       const response: ConnectTransportMessage = {
         type: SignalingMessageType.CONNECT_TRANSPORT,
         transportId: message.transportId,
@@ -243,11 +287,11 @@ export class SignalingHandler {
       };
 
       logger.info('Sending CONNECT_TRANSPORT response:', response);
-      socket.send(response);
+      socket.emit('message', response);
 
     } catch (error) {
       logger.error('Error in handleTransportConnectMessage:', error);
-      socket.send({
+      socket.emit('message', {
         type: SignalingMessageType.ERROR,
         error: error instanceof Error ? error.message : 'Unknown error'
       });

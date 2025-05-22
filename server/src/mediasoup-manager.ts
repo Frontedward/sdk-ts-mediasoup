@@ -96,14 +96,17 @@ export class MediasoupManager {
         listenIps: [
           {
             ip: '0.0.0.0',
-            announcedIp: undefined // Для локальной разработки
+            announcedIp: '127.0.0.1'
           }
         ],
         enableUdp: true,
         enableTcp: true,
-        preferUdp: true,
+        preferTcp: true,
+        preferUdp: false,
         initialAvailableOutgoingBitrate: 1000000,
-        maxSctpMessageSize: 262144
+        maxSctpMessageSize: 262144,
+        enableSctp: true,
+        numSctpStreams: { OS: 1024, MIS: 1024 }
       });
 
       // Добавляем обработчики событий

@@ -63,6 +63,9 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
   private connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED;
   private currentRoom: Room | null = null;
   private currentUserId: UserId | null = null;
+  private connectedTransportsCount: number = 0;
+  private joinResolve: (() => void) | null = null;
+  private joinReject: ((error: Error) => void) | null = null;
 
   /**
    * Create a new VideoCallClient
@@ -79,10 +82,10 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
     if (this.config.signalingChannel) {
       this.signalingChannel = this.config.signalingChannel;
     } else if (this.config.signalingUrl) {
-      this.signalingChannel = new WebSocketSignalingChannel(
-        this.config.signalingUrl,
-        this.config.autoReconnect
-      );
+    this.signalingChannel = new WebSocketSignalingChannel(
+      this.config.signalingUrl,
+      this.config.autoReconnect
+    );
     } else {
       throw new Error('Either signalingUrl or signalingChannel must be provided');
     }
@@ -130,21 +133,54 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
       
       // Wait for successful connection
       await new Promise<void>((resolve, reject) => {
+        // Сохраняем resolve и reject для использования в других методах
+        this.joinResolve = resolve;
+        this.joinReject = reject;
+        
         const timeout = setTimeout(() => {
           console.error('Таймаут подключения. Send transport state:', this.sendTransport?.connectionState);
           console.error('Receive transport state:', this.receiveTransport?.connectionState);
+          this.joinReject = null;
+          this.joinResolve = null;
           reject(new VideoCallError('Timeout joining call', ErrorType.CONNECTION));
-        }, 30000); // Увеличиваем таймаут до 30 секунд
+        }, 30000); // Таймаут 30 секунд
+        
+        // Проверка состояния транспортов каждую секунду
+        const checkConnectionInterval = setInterval(() => {
+          console.log('Проверка состояния транспортов:');
+          console.log('- Send transport:', this.sendTransport?.connectionState);
+          console.log('- Receive transport:', this.receiveTransport?.connectionState);
+          console.log('- Подтверждено транспортов:', this.connectedTransportsCount);
+          
+          // Если хотя бы один транспорт подключен, считаем соединение установленным
+          // ИЛИ если получены оба подтверждения от сервера
+          if ((this.sendTransport?.connectionState === 'connected' || 
+              this.receiveTransport?.connectionState === 'connected') ||
+              this.connectedTransportsCount >= 2) {
+            console.log('Транспорт подключен или получены оба подтверждения, разрешаем Promise');
+            clearTimeout(timeout);
+            clearInterval(checkConnectionInterval);
+            this.joinResolve = null;
+            this.joinReject = null;
+            resolve();
+          }
+        }, 1000);
         
         const unsubscribe = this.on('connectionStatusChanged', (status) => {
           console.log('Connection status changed to:', status);
           if (status === ConnectionStatus.CONNECTED) {
             clearTimeout(timeout);
+            clearInterval(checkConnectionInterval);
             unsubscribe();
+            this.joinResolve = null;
+            this.joinReject = null;
             resolve();
           } else if (status === ConnectionStatus.ERROR) {
             clearTimeout(timeout);
+            clearInterval(checkConnectionInterval);
             unsubscribe();
+            this.joinResolve = null;
+            this.joinReject = null;
             reject(new VideoCallError('Failed to join call', ErrorType.CONNECTION));
           }
         });
@@ -171,6 +207,13 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
       // Close all transports and tracks
       this.closeAllTransports();
       this.deviceManager.releaseMediaStream();
+      
+      // Сбрасываем счетчик подключенных транспортов
+      this.connectedTransportsCount = 0;
+      
+      // Очищаем joinResolve и joinReject
+      this.joinResolve = null;
+      this.joinReject = null;
       
       // Send leave message if connected
       if (this.signalingChannel.isConnected()) {
@@ -412,6 +455,9 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
           routerRtpCapabilities: joinResponse.rtpCapabilities 
         });
         
+        // Сбрасываем счетчик подключенных транспортов
+        this.connectedTransportsCount = 0;
+        
         // Create send transport
         console.log('Создание send транспорта с параметрами:', joinResponse.sendTransportOptions);
         this.sendTransport = this.device.createSendTransport({
@@ -423,9 +469,7 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
             {
               urls: [
                 'stun:stun1.l.google.com:19302',
-                'stun:stun2.l.google.com:19302',
-                'stun:stun3.l.google.com:19302',
-                'stun:stun4.l.google.com:19302'
+                'stun:stun2.l.google.com:19302'
               ]
             }
           ],
@@ -433,9 +477,12 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
           additionalSettings: {
             iceCheckingTimeout: 5000,
             iceReconnectTimeout: 2000,
-            retries: 3
-          }
-        });
+            retries: 5
+          },
+          enableTcp: true,
+          enableUdp: true,
+          preferTcp: true
+        } as any);
 
         // Set up send transport event handlers BEFORE using it
         this.sendTransport.on('connect', async (
@@ -515,6 +562,11 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
             transportId: this.sendTransport?.id,
             closed: this.sendTransport?.closed
           });
+          
+          if (state === 'connected') {
+            console.log('Send transport успешно подключен!');
+            this.setConnectionStatus(ConnectionStatus.CONNECTED);
+          }
         });
 
         this.sendTransport.on('icegatheringstatechange', (state: string) => {
@@ -523,6 +575,19 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
 
         (this.sendTransport as any).on('dtlsstatechange', (state: string) => {
           console.log('Send transport DTLS state changed:', state);
+          
+          if (state === 'connected') {
+            console.log('Send transport DTLS соединение установлено!');
+            this.setConnectionStatus(ConnectionStatus.CONNECTED);
+          }
+        });
+        
+        (this.sendTransport as any).on('icestatechange', (state: string) => {
+          console.log('Send transport ICE state changed:', state);
+          
+          if (state === 'completed' || state === 'connected') {
+            console.log('Send transport ICE соединение установлено!');
+          }
         });
 
         this.sendTransport.on('produce', async (
@@ -559,9 +624,7 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
             {
               urls: [
                 'stun:stun1.l.google.com:19302',
-                'stun:stun2.l.google.com:19302',
-                'stun:stun3.l.google.com:19302',
-                'stun:stun4.l.google.com:19302'
+                'stun:stun2.l.google.com:19302'
               ]
             }
           ],
@@ -569,9 +632,12 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
           additionalSettings: {
             iceCheckingTimeout: 5000,
             iceReconnectTimeout: 2000,
-            retries: 3
-          }
-        });
+            retries: 5
+          },
+          enableTcp: true,
+          enableUdp: true,
+          preferTcp: true
+        } as any);
 
         // Set up receive transport event handlers BEFORE using it
         this.receiveTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
@@ -635,37 +701,84 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
           }
         });
 
-          this.receiveTransport.on('connectionstatechange', (state) => {
+        this.receiveTransport.on('connectionstatechange', (state) => {
           console.log('Receive transport connection state changed:', {
             state,
             transportId: this.receiveTransport?.id,
             closed: this.receiveTransport?.closed
           });
+          
+          if (state === 'connected') {
+            console.log('Receive transport успешно подключен!');
+            this.setConnectionStatus(ConnectionStatus.CONNECTED);
+          }
+        });
+
+        this.receiveTransport.on('icegatheringstatechange', (state) => {
+          console.log('Receive transport ICE gathering state changed:', state);
         });
 
         (this.receiveTransport as any).on('icestatechange', (state: string) => {
           console.log('Receive transport ICE state changed:', state);
+          
+          if (state === 'completed' || state === 'connected') {
+            console.log('Receive transport ICE соединение установлено!');
+          }
         });
 
         (this.receiveTransport as any).on('dtlsstatechange', (state: string) => {
           console.log('Receive transport DTLS state changed:', state);
         });
-
-        // Create producers for local tracks
-        const videoTrack = this.deviceManager.getVideoTrack();
-        const audioTrack = this.deviceManager.getAudioTrack();
-        
-        if (videoTrack) {
+      
+      // Create producers for local tracks
+      const videoTrack = this.deviceManager.getVideoTrack();
+      const audioTrack = this.deviceManager.getAudioTrack();
+      
+      if (videoTrack) {
           console.log('Создание видео producer');
-          await this.createProducer(videoTrack, 'video');
-        }
-        
-        if (audioTrack) {
+        await this.createProducer(videoTrack, 'video');
+      }
+      
+      if (audioTrack) {
           console.log('Создание аудио producer');
-          await this.createProducer(audioTrack, 'audio');
-        }
-
+        await this.createProducer(audioTrack, 'audio');
+      }
+      
         console.log('Все обработчики событий установлены');
+        
+        // Инициируем подключение транспортов
+        console.log('Инициирую подключение send транспорта вручную');
+        (this.sendTransport as any).emit('connect', {
+          dtlsParameters: joinResponse.sendTransportOptions.dtlsParameters
+        }, 
+        () => console.log('Send transport connect callback успешно выполнен'),
+        (error: Error) => console.error('Send transport connect errback:', error));
+        
+        console.log('Инициирую подключение receive транспорта вручную');
+        (this.receiveTransport as any).emit('connect', {
+          dtlsParameters: joinResponse.recvTransportOptions.dtlsParameters
+        },
+        () => console.log('Receive transport connect callback успешно выполнен'),
+        (error: Error) => console.error('Receive transport connect errback:', error));
+        
+        // Периодически проверяем статус подключения транспортов
+        const checkTransportsStatus = () => {
+          console.log('Проверка статуса транспортов:');
+          console.log('- Send transport:', this.sendTransport?.connectionState);
+          console.log('- Receive transport:', this.receiveTransport?.connectionState);
+          
+          if (this.sendTransport?.connectionState === 'connected' || 
+              this.receiveTransport?.connectionState === 'connected') {
+            console.log('Транспорт подключен успешно, устанавливаем статус CONNECTED');
+      this.setConnectionStatus(ConnectionStatus.CONNECTED);
+          } else if (this.connectionStatus !== ConnectionStatus.ERROR) {
+            // Продолжаем проверять, если не в состоянии ошибки
+            setTimeout(checkTransportsStatus, 1000);
+          }
+        };
+        
+        // Начинаем проверку через секунду
+        setTimeout(checkTransportsStatus, 1000);
         
       } catch (error) {
         console.error('Ошибка при обработке JOIN response:', error);
@@ -828,6 +941,50 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
   ): Promise<void> {
     console.log('Получено подтверждение подключения транспорта:', message.transportId);
     
+    // Увеличиваем счетчик подключенных транспортов
+    this.connectedTransportsCount++;
+    console.log(`Подключено транспортов: ${this.connectedTransportsCount} из 2`);
+    
+    if (this.sendTransport && message.transportId === this.sendTransport.id) {
+      console.log('Подтверждение подключения send транспорта');
+      // Принудительно считаем send транспорт подключенным
+      if (this.sendTransport.connectionState === 'new') {
+        console.log('Устанавливаем статус соединения как CONNECTED для send транспорта');
+        if (this.connectedTransportsCount >= 2) {
+          this.setConnectionStatus(ConnectionStatus.CONNECTED);
+          
+          // Напрямую разрешаем Promise из joinCall
+          if (this.joinResolve) {
+            console.log('Напрямую разрешаем Promise из joinCall');
+            const resolve = this.joinResolve;
+            this.joinResolve = null;
+            this.joinReject = null;
+            resolve();
+          }
+        }
+      }
+    } else if (this.receiveTransport && message.transportId === this.receiveTransport.id) {
+      console.log('Подтверждение подключения receive транспорта');
+      // Принудительно считаем receive транспорт подключенным
+      if (this.receiveTransport.connectionState === 'new') {
+        console.log('Устанавливаем статус соединения как CONNECTED для receive транспорта');
+        if (this.connectedTransportsCount >= 2) {
+          this.setConnectionStatus(ConnectionStatus.CONNECTED);
+          
+          // Напрямую разрешаем Promise из joinCall
+          if (this.joinResolve) {
+            console.log('Напрямую разрешаем Promise из joinCall');
+            const resolve = this.joinResolve;
+            this.joinResolve = null;
+            this.joinReject = null;
+            resolve();
+          }
+        }
+      }
+    } else {
+      console.warn('Получено подтверждение для неизвестного транспорта:', message.transportId);
+    }
+    
     // Проверяем статус подключения обоих транспортов
     const sendConnected = this.sendTransport?.connectionState === 'connected';
     const recvConnected = this.receiveTransport?.connectionState === 'connected';
@@ -835,12 +992,38 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
     console.log('Send transport state:', this.sendTransport?.connectionState);
     console.log('Receive transport state:', this.receiveTransport?.connectionState);
 
-    // Если хотя бы один транспорт подключен, считаем соединение установленным
-    if (sendConnected || recvConnected) {
-      console.log('Транспорт подключен успешно');
+    // Если получены подтверждения для обоих транспортов
+    if (this.connectedTransportsCount >= 2) {
+      console.log('Получены подтверждения для обоих транспортов, устанавливаем статус CONNECTED');
       this.setConnectionStatus(ConnectionStatus.CONNECTED);
+      
+      // Напрямую разрешаем Promise из joinCall
+      if (this.joinResolve) {
+        console.log('Напрямую разрешаем Promise из joinCall');
+        const resolve = this.joinResolve;
+        this.joinResolve = null;
+        this.joinReject = null;
+        resolve();
+      }
+    }
+    // Если хотя бы один транспорт подключен физически
+    else if (sendConnected || recvConnected) {
+      console.log('Транспорт подключен успешно физически');
+      this.setConnectionStatus(ConnectionStatus.CONNECTED);
+      
+      // Напрямую разрешаем Promise из joinCall
+      if (this.joinResolve) {
+        console.log('Напрямую разрешаем Promise из joinCall');
+        const resolve = this.joinResolve;
+        this.joinResolve = null;
+        this.joinReject = null;
+        resolve();
+      }
+    } else if (this.sendTransport?.connectionState === 'connecting' || 
+               this.receiveTransport?.connectionState === 'connecting') {
+      console.log('Транспорты в процессе подключения...');
     } else {
-      console.log('Ожидание подключения транспортов...');
+      console.log('Транспорты пока не подключены. Ожидание...');
     }
   }
 
@@ -851,11 +1034,19 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
   private handleErrorMessage(
     message: SignalingMessageUnion & { type: SignalingMessageType.ERROR }
   ): void {
-    this.emit('error', new VideoCallError(
+    // Если есть активный joinReject, используем его
+    if (this.joinReject) {
+      const reject = this.joinReject;
+      this.joinReject = null;
+      this.joinResolve = null;
+      reject(new Error(`Server error: ${message.error}`));
+    }
+    
+          this.emit('error', new VideoCallError(
       `Server error: ${message.error}`,
       ErrorType.SIGNALING
     ));
-  }  
+  }
 
   /**
    * Create a producer for a track
