@@ -16,14 +16,17 @@ import {
   SignalingMessageType,
   SignalingMessageUnion,
   UserId,
-  VideoCallError
+  VideoCallError,
+  JoinMessage,
+  JoinResponse
 } from './types';
 
 /**
  * Configuration for the VideoCallClient
  */
 export interface VideoCallClientConfig {
-  signalingUrl: string;
+  signalingUrl?: string;
+  signalingChannel?: SignalingChannel;
   autoReconnect?: boolean;
   useSimulcast?: boolean;
 }
@@ -71,10 +74,16 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
       ...config
     };
     
-    this.signalingChannel = new WebSocketSignalingChannel(
-      this.config.signalingUrl,
-      this.config.autoReconnect
-    );
+    if (this.config.signalingChannel) {
+      this.signalingChannel = this.config.signalingChannel;
+    } else if (this.config.signalingUrl) {
+      this.signalingChannel = new WebSocketSignalingChannel(
+        this.config.signalingUrl,
+        this.config.autoReconnect
+      );
+    } else {
+      throw new Error('Either signalingUrl or signalingChannel must be provided');
+    }
     
     this.deviceManager = new DeviceManager();
     this.eventQueue = new AsyncEventQueue();
@@ -116,15 +125,18 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
       });
 
       // Initialize media device
-      const stream = await this.deviceManager.getUserMedia();
+      await this.deviceManager.getUserMedia();
       
       // Wait for successful connection
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
+          console.error('Таймаут подключения. Send transport state:', this.sendTransport?.connectionState);
+          console.error('Receive transport state:', this.recvTransport?.connectionState);
           reject(new VideoCallError('Timeout joining call', ErrorType.CONNECTION));
-        }, 10000);
+        }, 30000); // Увеличиваем таймаут до 30 секунд
         
         const unsubscribe = this.on('connectionStatusChanged', (status) => {
+          console.log('Connection status changed to:', status);
           if (status === ConnectionStatus.CONNECTED) {
             clearTimeout(timeout);
             unsubscribe();
@@ -317,49 +329,58 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
    */
   private handleSignalingMessage(message: SignalingMessageUnion): void {
     // Enqueue message handling to ensure sequential processing
+    console.log('Получено сообщение от сервера:', message);
+    
     this.eventQueue.enqueueFunction(async () => {
       try {
         switch (message.type) {
           case SignalingMessageType.JOIN:
             // Server confirmed our join or another participant joined
-            await this.handleJoinMessage(message);
+            console.log('Обработка JOIN сообщения');
+            await this.handleJoinMessage(message as JoinMessage | JoinResponse);
             break;
             
           case SignalingMessageType.LEAVE:
             // A participant left
+            console.log('Обработка LEAVE сообщения');
             this.handleLeaveMessage(message);
             break;
             
           case SignalingMessageType.NEW_PRODUCER:
             // A new producer was created
+            console.log('Обработка NEW_PRODUCER сообщения');
             await this.handleNewProducerMessage(message);
             break;
             
           case SignalingMessageType.PRODUCER_CLOSED:
             // A producer was closed
+            console.log('Обработка PRODUCER_CLOSED сообщения');
             this.handleProducerClosedMessage(message);
             break;
             
           case SignalingMessageType.CONSUME:
             // Server tells us to consume a producer
+            console.log('Обработка CONSUME сообщения');
             await this.handleConsumeMessage(message);
             break;
             
           case SignalingMessageType.CONNECT_TRANSPORT:
             // Transport connection info from server
+            console.log('Обработка CONNECT_TRANSPORT сообщения');
             await this.handleConnectTransportMessage(message);
             break;
             
           case SignalingMessageType.ERROR:
             // Error from server
+            console.log('Обработка ERROR сообщения');
             this.handleErrorMessage(message);
             break;
             
           default:
-            console.warn('Unknown message type:', message);
+            console.warn('Неизвестный тип сообщения:', message);
         }
       } catch (error) {
-        console.error('Error handling signaling message:', error);
+        console.error('Ошибка обработки сообщения:', error);
         this.emit('error', new VideoCallError(
           `Error handling signaling message: ${error instanceof Error ? error.message : String(error)}`,
           ErrorType.SIGNALING
@@ -372,33 +393,181 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
    * Handle join message
    * @param message The join message
    */
-  private async handleJoinMessage(message: SignalingMessageUnion & { type: SignalingMessageType.JOIN }): Promise<void> {
+  private async handleJoinMessage(message: JoinMessage | JoinResponse): Promise<void> {
     if (!this.currentRoom) {
       throw new Error('No current room');
     }
 
     // If this is our own join confirmation
     if (message.userId === this.currentUserId) {
-      // Load mediasoup device
-      await this.loadDevice();
+      const joinResponse = message as JoinResponse;
+      console.log('Получен JOIN response:', joinResponse);
       
-      // Create send and receive transports
-      await this.createSendTransport();
-      await this.createRecvTransport();
-      
-      // Create producers for local tracks
-      const videoTrack = this.deviceManager.getVideoTrack();
-      const audioTrack = this.deviceManager.getAudioTrack();
-      
-      if (videoTrack) {
-        await this.createProducer(videoTrack, 'video');
+      try {
+        // Load mediasoup device with router capabilities
+        console.log('Загрузка устройства с возможностями:', joinResponse.rtpCapabilities);
+        await this.device.load({ 
+          routerRtpCapabilities: joinResponse.rtpCapabilities 
+        });
+        
+        // Create send transport
+        console.log('Создание send транспорта с параметрами:', joinResponse.sendTransportOptions);
+        this.sendTransport = this.device.createSendTransport({
+          ...joinResponse.sendTransportOptions,
+          iceServers: [],
+          iceTransportPolicy: 'all',
+          additionalSettings: {
+            encodedInsertableStreams: false,
+            forceEncodedVideoInsertableStreams: false,
+            forceEncodedAudioInsertableStreams: false
+          }
+        });
+
+        // Create receive transport
+        console.log('Создание receive транспорта с параметрами:', joinResponse.recvTransportOptions);
+        this.recvTransport = this.device.createRecvTransport({
+          ...joinResponse.recvTransportOptions,
+          iceServers: [],
+          iceTransportPolicy: 'all',
+          additionalSettings: {
+            encodedInsertableStreams: false,
+            forceEncodedVideoInsertableStreams: false,
+            forceEncodedAudioInsertableStreams: false
+          }
+        });
+
+        // Set up send transport event handlers
+        this.sendTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
+          try {
+            console.log('Send transport connect event с параметрами:', dtlsParameters);
+            await new Promise<void>((resolve, reject) => {
+              const timeout = setTimeout(() => {
+                reject(new Error('Timeout waiting for send transport connect response'));
+              }, 5000);
+
+              const messageHandler = (msg: SignalingMessageUnion) => {
+                if (msg.type === SignalingMessageType.CONNECT_TRANSPORT && 
+                    msg.transportId === this.sendTransport!.id) {
+                  this.signalingChannel.off('message', messageHandler);
+                  clearTimeout(timeout);
+                  resolve();
+                }
+              };
+
+              this.signalingChannel.on('message', messageHandler);
+              
+              this.signalingChannel.send({
+                type: SignalingMessageType.TRANSPORT_CONNECT,
+                transportId: this.sendTransport!.id,
+                dtlsParameters
+              });
+              console.log('Отправлено TRANSPORT_CONNECT для send транспорта');
+            });
+            callback();
+          } catch (error) {
+            console.error('Ошибка в send transport connect:', error);
+            this.setConnectionStatus(ConnectionStatus.ERROR);
+            errback(error as Error);
+          }
+        });
+
+        this.sendTransport.on('produce', async ({ kind, rtpParameters, appData }, callback, errback) => {
+          try {
+            console.log('Transport produce event:', { kind, rtpParameters });
+            this.signalingChannel.send({
+              type: SignalingMessageType.TRANSPORT_PRODUCE,
+              transportId: this.sendTransport!.id,
+              kind,
+              rtpParameters,
+              appData
+            });
+            console.log('Отправлено TRANSPORT_PRODUCE');
+            const producerId = 'producer-' + Math.random().toString(36).substring(2, 15);
+            callback({ id: producerId });
+          } catch (error) {
+            console.error('Ошибка в transport produce:', error);
+            errback(error as Error);
+          }
+        });
+
+        // Set up receive transport event handlers
+        this.recvTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
+          try {
+            console.log('Receive transport connect event с параметрами:', dtlsParameters);
+            await new Promise<void>((resolve, reject) => {
+              const timeout = setTimeout(() => {
+                reject(new Error('Timeout waiting for receive transport connect response'));
+              }, 5000);
+
+              const messageHandler = (msg: SignalingMessageUnion) => {
+                if (msg.type === SignalingMessageType.CONNECT_TRANSPORT && 
+                    msg.transportId === this.recvTransport!.id) {
+                  this.signalingChannel.off('message', messageHandler);
+                  clearTimeout(timeout);
+                  resolve();
+                }
+              };
+
+              this.signalingChannel.on('message', messageHandler);
+              
+              this.signalingChannel.send({
+                type: SignalingMessageType.TRANSPORT_CONNECT,
+                transportId: this.recvTransport!.id,
+                dtlsParameters
+              });
+              console.log('Отправлено TRANSPORT_CONNECT для receive транспорта');
+            });
+            callback();
+          } catch (error) {
+            console.error('Ошибка в receive transport connect:', error);
+            this.setConnectionStatus(ConnectionStatus.ERROR);
+            errback(error as Error);
+          }
+        });
+
+        // Set up transport connection state change handlers
+        this.sendTransport.on('connectionstatechange', (state) => {
+          console.log('Send transport connection state changed to:', state);
+          if (state === 'connected') {
+            console.log('Send transport connected successfully');
+            this.setConnectionStatus(ConnectionStatus.CONNECTED);
+          } else if (state === 'failed' || state === 'disconnected' || state === 'closed') {
+            console.error('Send transport connection failed:', state);
+            this.setConnectionStatus(ConnectionStatus.ERROR);
+          }
+        });
+
+        this.recvTransport.on('connectionstatechange', (state) => {
+          console.log('Receive transport connection state changed to:', state);
+          if (state === 'connected') {
+            console.log('Receive transport connected successfully');
+            this.setConnectionStatus(ConnectionStatus.CONNECTED);
+          } else if (state === 'failed' || state === 'disconnected' || state === 'closed') {
+            console.error('Receive transport connection failed:', state);
+            this.setConnectionStatus(ConnectionStatus.ERROR);
+          }
+        });
+        
+        // Create producers for local tracks
+        const videoTrack = this.deviceManager.getVideoTrack();
+        const audioTrack = this.deviceManager.getAudioTrack();
+        
+        if (videoTrack) {
+          console.log('Создание видео producer');
+          await this.createProducer(videoTrack, 'video');
+        }
+        
+        if (audioTrack) {
+          console.log('Создание аудио producer');
+          await this.createProducer(audioTrack, 'audio');
+        }
+
+        console.log('Все обработчики событий установлены');
+        
+      } catch (error) {
+        console.error('Ошибка при обработке JOIN response:', error);
+        throw error;
       }
-      
-      if (audioTrack) {
-        await this.createProducer(audioTrack, 'audio');
-      }
-      
-      this.setConnectionStatus(ConnectionStatus.CONNECTED);
     }
     
     // Add the participant to our room state
@@ -549,7 +718,22 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
   private async handleConnectTransportMessage(
     message: SignalingMessageUnion & { type: SignalingMessageType.CONNECT_TRANSPORT }
   ): Promise<void> {
-    // No implementation needed as this is typically sent from client to server
+    console.log('Получено подтверждение подключения транспорта:', message.transportId);
+    
+    // Проверяем статус подключения обоих транспортов
+    const sendConnected = this.sendTransport?.connectionState === 'connected';
+    const recvConnected = this.recvTransport?.connectionState === 'connected';
+    
+    console.log('Send transport state:', this.sendTransport?.connectionState);
+    console.log('Receive transport state:', this.recvTransport?.connectionState);
+
+    // Если хотя бы один транспорт подключен, считаем соединение установленным
+    if (sendConnected || recvConnected) {
+      console.log('Транспорт подключен успешно');
+      this.setConnectionStatus(ConnectionStatus.CONNECTED);
+    } else {
+      console.log('Ожидание подключения транспортов...');
+    }
   }
 
   /**
@@ -563,240 +747,7 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
       `Server error: ${message.error}`,
       ErrorType.SIGNALING
     ));
-  }
-
-  /**
-   * Load the mediasoup device
-   */
-  private async loadDevice(): Promise<void> {
-    try {
-      // Request RTP capabilities from server by sending a message
-      // In a real implementation, we would wait for the response
-      // For now, we'll use a placeholder
-      const rtpCapabilities = {
-        codecs: [
-          {
-            kind: 'audio',
-            mimeType: 'audio/opus',
-            clockRate: 48000,
-            channels: 2,
-            parameters: {
-              useinbandfec: 1,
-              minptime: 10,
-              maxplaybackrate: 48000
-            },
-            rtcpFeedback: []
-          },
-          {
-            kind: 'video',
-            mimeType: 'video/VP8',
-            clockRate: 90000,
-            parameters: {},
-            rtcpFeedback: [
-              { type: 'nack' },
-              { type: 'nack', parameter: 'pli' },
-              { type: 'ccm', parameter: 'fir' },
-              { type: 'goog-remb' }
-            ]
-          }
-        ],
-        headerExtensions: [
-          {
-            kind: 'audio',
-            uri: 'urn:ietf:params:rtp-hdrext:sdes:mid',
-            preferredId: 1
-          },
-          {
-            kind: 'video',
-            uri: 'urn:ietf:params:rtp-hdrext:sdes:mid',
-            preferredId: 1
-          }
-        ]
-      };
-      
-      // Load the device with RTP capabilities
-      await this.device.load({ routerRtpCapabilities: rtpCapabilities });
-      
-    } catch (error) {
-      console.error('Error loading device:', error);
-      throw new VideoCallError(
-        `Error loading device: ${error instanceof Error ? error.message : String(error)}`,
-        ErrorType.MEDIA
-      );
-    }
-  }
-
-  /**
-   * Create a send transport
-   */
-  private async createSendTransport(): Promise<void> {
-    try {
-      // Request transport parameters from server
-      // In a real implementation, we would wait for the response
-      // For now, we'll use placeholder data
-      const transportOptions = {
-        id: 'send-' + Math.random().toString(36).substring(2, 15),
-        iceParameters: {
-          usernameFragment: 'userfrag',
-          password: 'password',
-          iceLite: true
-        },
-        iceCandidates: [
-          {
-            foundation: '1',
-            priority: 1,
-            ip: '127.0.0.1',
-            protocol: 'udp',
-            port: 10000,
-            type: 'host'
-          }
-        ],
-        dtlsParameters: {
-          role: 'client',
-          fingerprints: [
-            {
-              algorithm: 'sha-256',
-              value: '00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00'
-            }
-          ]
-        }
-      };
-      
-      // Create the send transport
-      this.sendTransport = this.device.createSendTransport(transportOptions);
-      
-      // Set up transport event handlers
-      this.sendTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
-        try {
-          // Inform the server to connect the transport
-          this.signalingChannel.send({
-            type: SignalingMessageType.TRANSPORT_CONNECT,
-            transportId: this.sendTransport!.id,
-            dtlsParameters
-          });
-          
-          // Signal success
-          callback();
-        } catch (error) {
-          errback(error as Error);
-        }
-      });
-      
-      this.sendTransport.on('produce', async ({ kind, rtpParameters, appData }, callback, errback) => {
-        try {
-          // Inform the server to create a producer
-          this.signalingChannel.send({
-            type: SignalingMessageType.TRANSPORT_PRODUCE,
-            transportId: this.sendTransport!.id,
-            kind,
-            rtpParameters,
-            appData
-          });
-          
-          // In a real implementation, we would wait for the response with the producer ID
-          // For now, we'll generate a random ID
-          const producerId = 'producer-' + Math.random().toString(36).substring(2, 15);
-          
-          // Signal success with the producer ID
-          callback({ id: producerId });
-        } catch (error) {
-          errback(error as Error);
-        }
-      });
-      
-      this.sendTransport.on('connectionstatechange', (state) => {
-        console.log('Send transport connection state changed to', state);
-        if (state === 'failed' || state === 'closed') {
-          this.emit('error', new VideoCallError(
-            `Send transport connection failed: ${state}`,
-            ErrorType.TRANSPORT
-          ));
-        }
-      });
-      
-    } catch (error) {
-      console.error('Error creating send transport:', error);
-      throw new VideoCallError(
-        `Error creating send transport: ${error instanceof Error ? error.message : String(error)}`,
-        ErrorType.TRANSPORT
-      );
-    }
-  }
-
-  /**
-   * Create a receive transport
-   */
-  private async createRecvTransport(): Promise<void> {
-    try {
-      // Request transport parameters from server
-      // In a real implementation, we would wait for the response
-      // For now, we'll use placeholder data
-      const transportOptions = {
-        id: 'recv-' + Math.random().toString(36).substring(2, 15),
-        iceParameters: {
-          usernameFragment: 'userfrag',
-          password: 'password',
-          iceLite: true
-        },
-        iceCandidates: [
-          {
-            foundation: '1',
-            priority: 1,
-            ip: '127.0.0.1',
-            protocol: 'udp',
-            port: 10000,
-            type: 'host'
-          }
-        ],
-        dtlsParameters: {
-          role: 'client',
-          fingerprints: [
-            {
-              algorithm: 'sha-256',
-              value: '00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00'
-            }
-          ]
-        }
-      };
-      
-      // Create the receive transport
-      this.recvTransport = this.device.createRecvTransport(transportOptions);
-      
-      // Set up transport event handlers
-      this.recvTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
-        try {
-          // Inform the server to connect the transport
-          this.signalingChannel.send({
-            type: SignalingMessageType.TRANSPORT_CONNECT,
-            transportId: this.recvTransport!.id,
-            dtlsParameters
-          });
-          
-          // Signal success
-          callback();
-        } catch (error) {
-          errback(error as Error);
-        }
-      });
-      
-      this.recvTransport.on('connectionstatechange', (state) => {
-        console.log('Receive transport connection state changed to', state);
-        if (state === 'failed' || state === 'closed') {
-          this.emit('error', new VideoCallError(
-            `Receive transport connection failed: ${state}`,
-            ErrorType.TRANSPORT
-          ));
-        }
-      });
-      
-    } catch (error) {
-      console.error('Error creating receive transport:', error);
-      throw new VideoCallError(
-        `Error creating receive transport: ${error instanceof Error ? error.message : String(error)}`,
-        ErrorType.TRANSPORT
-      );
-    }
-  }
+  }  
 
   /**
    * Create a producer for a track
@@ -838,7 +789,7 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
           id: producer.id,
           type: kind,
           paused: producer.paused,
-          track: producer.track,
+          track: producer.track || undefined,
           appData: producer.appData as Record<string, any>
         };
         

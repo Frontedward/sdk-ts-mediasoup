@@ -1,4 +1,4 @@
-import { makeAutoObservable } from 'mobx';
+import { makeAutoObservable, action } from 'mobx';
 import { 
   ConnectionStatus, 
   Consumer, 
@@ -40,6 +40,30 @@ export class CallStore {
     makeAutoObservable(this);
   }
 
+  // Actions
+  setConnectionStatus = action((status: ConnectionStatus) => {
+    this.connectionStatus = status;
+  });
+
+  setError = action((error: VideoCallError | null) => {
+    this.error = error;
+  });
+
+  updateRoomState = action(() => {
+    this.currentRoom = this.client.getCurrentRoom();
+    this.currentUserId = this.client.getCurrentUserId();
+  });
+
+  toggleVideo = action(() => {
+    this.localVideoEnabled = !this.localVideoEnabled;
+    // Здесь должна быть логика включения/выключения видео через client
+  });
+
+  toggleAudio = action(() => {
+    this.localAudioEnabled = !this.localAudioEnabled;
+    // Здесь должна быть логика включения/выключения аудио через client
+  });
+
   /**
    * Join a call
    * @param roomId The room ID to join
@@ -74,44 +98,6 @@ export class CallStore {
       } else {
         this.error = new VideoCallError(
           `Failed to leave call: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-      throw error;
-    }
-  }
-
-  /**
-   * Toggle local video
-   */
-  async toggleVideo(): Promise<void> {
-    try {
-      await this.client.enableVideo(!this.localVideoEnabled);
-      this.localVideoEnabled = !this.localVideoEnabled;
-    } catch (error) {
-      if (error instanceof VideoCallError) {
-        this.error = error;
-      } else {
-        this.error = new VideoCallError(
-          `Failed to toggle video: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-      throw error;
-    }
-  }
-
-  /**
-   * Toggle local audio
-   */
-  async toggleAudio(): Promise<void> {
-    try {
-      await this.client.enableAudio(!this.localAudioEnabled);
-      this.localAudioEnabled = !this.localAudioEnabled;
-    } catch (error) {
-      if (error instanceof VideoCallError) {
-        this.error = error;
-      } else {
-        this.error = new VideoCallError(
-          `Failed to toggle audio: ${error instanceof Error ? error.message : String(error)}`
         );
       }
       throw error;
@@ -194,46 +180,21 @@ export class CallStore {
    */
   private setupListeners(): void {
     // Connection status changes
-    this.client.on('connectionStatusChanged', (status) => {
+    this.client.on('connectionStatusChanged', action((status) => {
       this.connectionStatus = status;
-    });
+    }));
     
     // Error events
-    this.client.on('error', (error) => {
+    this.client.on('error', action((error) => {
       this.error = error;
-    });
+    }));
     
     // Room state updates
-    this.client.on('participantJoined', () => {
-      this.updateRoomState();
-    });
-    
-    this.client.on('participantLeft', () => {
-      this.updateRoomState();
-    });
-    
-    this.client.on('newConsumer', () => {
-      this.updateRoomState();
-    });
-    
-    this.client.on('consumerClosed', () => {
-      this.updateRoomState();
-    });
-    
-    this.client.on('newProducer', () => {
-      this.updateRoomState();
-    });
-    
-    this.client.on('producerClosed', () => {
-      this.updateRoomState();
-    });
-  }
-
-  /**
-   * Update the room state from the client
-   */
-  private updateRoomState(): void {
-    this.currentRoom = this.client.getCurrentRoom();
-    this.currentUserId = this.client.getCurrentUserId();
+    this.client.on('participantJoined', () => this.updateRoomState());
+    this.client.on('participantLeft', () => this.updateRoomState());
+    this.client.on('newConsumer', () => this.updateRoomState());
+    this.client.on('consumerClosed', () => this.updateRoomState());
+    this.client.on('newProducer', () => this.updateRoomState());
+    this.client.on('producerClosed', () => this.updateRoomState());
   }
 }

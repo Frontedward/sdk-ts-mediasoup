@@ -11,12 +11,14 @@
     "test": "vitest"
   },
   "dependencies": {
+    "@types/socket.io-client": "^3.0.0",
     "lucide-react": "^0.344.0",
     "mediasoup-client": "^3.6.98",
     "mobx": "^6.12.0",
     "mobx-react-lite": "^4.0.5",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "socket.io-client": "^4.8.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.9.1",

@@ -1,21 +1,44 @@
-import express from 'express';
+import { Request, Response } from 'express';
+const express = require('express');
 import { createServer } from 'http';
 import { Server } from 'socket.io';
+import cors from 'cors';
 import { logger } from './logger';
-import { RoomManager } from './room-manager';
 import { SignalingHandler } from './signaling-handler';
 
 const app = express();
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: '*',
-    methods: ['GET', 'POST']
-  }
+    origin: ['http://localhost:5173', 'http://localhost:5174'],
+    methods: ['GET', 'POST'],
+    credentials: true
+  },
+  transports: ['websocket']
 });
 
-const roomManager = new RoomManager();
-const signalingHandler = new SignalingHandler(roomManager);
+const signalingHandler = new SignalingHandler();
+
+// Инициализация mediasoup
+(async () => {
+  try {
+    await signalingHandler.init();
+    logger.info('Mediasoup initialized successfully');
+  } catch (error) {
+    logger.error('Failed to initialize mediasoup:', error);
+    process.exit(1);
+  }
+})();
+
+// Базовый маршрут для проверки работы сервера
+app.get('/', (_: Request, res: Response) => {
+  res.json({ status: 'ok' });
+});
 
 // Обработка WebSocket соединений
 io.on('connection', (socket) => {
@@ -24,6 +47,7 @@ io.on('connection', (socket) => {
   // Обработка сигналинг-сообщений
   socket.on('message', async (message) => {
     try {
+      logger.info(`Получено сообщение от ${socket.id}:`, message);
       await signalingHandler.handleMessage(socket, message);
     } catch (error) {
       logger.error('Ошибка обработки сообщения:', error);

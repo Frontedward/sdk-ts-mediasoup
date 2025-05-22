@@ -1,10 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { observer } from 'mobx-react-lite';
 import { Mic, MicOff, Video, VideoOff, Users, Phone } from 'lucide-react';
-import { VideoCallClient } from '../sdk/video-call-client';
+import { 
+  VideoCallClient, 
+  MockSignalingChannel, 
+  ConnectionStatus, 
+  Participant 
+} from '../sdk';
 import { CallStore } from '../sdk/store/call-store';
-import { ConnectionStatus, Participant } from '../sdk/types';
-import { MockSignalingChannel } from '../sdk/signaling/signaling-channel';
 
 // Create a mock signaling channel instead of trying to connect to a real server
 const mockSignaling = new MockSignalingChannel();

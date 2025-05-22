@@ -1,3 +1,4 @@
+import { io, Socket } from 'socket.io-client';
 import { SimpleEventEmitter } from '../events/typed-event-emitter';
 import { SignalingMessageUnion } from '../types';
 
@@ -6,8 +7,8 @@ import { SignalingMessageUnion } from '../types';
  */
 export interface SignalingEvents {
   message: SignalingMessageUnion;
-  open: void;
-  close: void;
+  open: undefined;
+  close: undefined;
   error: Error;
 }
 
@@ -19,10 +20,8 @@ export interface SignalingChannel {
   disconnect(): void;
   send(message: SignalingMessageUnion): void;
   isConnected(): boolean;
-  on<K extends keyof SignalingEvents>(
-    event: K, 
-    callback: (payload: SignalingEvents[K]) => void
-  ): () => void;
+  on<K extends keyof SignalingEvents>(event: K, listener: (data: SignalingEvents[K]) => void): () => void;
+  off<K extends keyof SignalingEvents>(event: K, listener: (data: SignalingEvents[K]) => void): void;
 }
 
 /**
@@ -32,12 +31,9 @@ export class WebSocketSignalingChannel
   extends SimpleEventEmitter<SignalingEvents> 
   implements SignalingChannel {
   
-  private ws: WebSocket | null = null;
+  private socket: Socket | null = null;
   private url: string;
   private autoReconnect: boolean;
-  private reconnectAttempts: number = 0;
-  private maxReconnectAttempts: number = 5;
-  private reconnectDelay: number = 1000;
 
   /**
    * Create a new WebSocket signaling channel
@@ -54,27 +50,25 @@ export class WebSocketSignalingChannel
    * Connect to the WebSocket server
    */
   async connect(): Promise<void> {
-    if (this.ws?.readyState === WebSocket.OPEN) {
+    if (this.socket?.connected) {
       return;
     }
 
     return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(this.url);
+      this.socket = io(this.url, {
+        reconnection: this.autoReconnect,
+        transports: ['websocket']
+      });
 
-      const onOpen = () => {
-        this.reconnectAttempts = 0;
+      this.socket.on('connect', () => {
         this.emit('open', undefined);
-        this.ws?.removeEventListener('open', onOpen);
         resolve();
-      };
+      });
 
-      const onError = (error: Event) => {
-        this.ws?.removeEventListener('error', onError);
+      this.socket.on('connect_error', (error) => {
+        console.error('Ошибка подключения к сигнальному серверу:', error);
         reject(new Error('Failed to connect to signaling server'));
-      };
-
-      this.ws.addEventListener('open', onOpen);
-      this.ws.addEventListener('error', onError);
+      });
 
       this.setupEventListeners();
     });
@@ -84,10 +78,9 @@ export class WebSocketSignalingChannel
    * Disconnect from the WebSocket server
    */
   disconnect(): void {
-    if (this.ws) {
-      this.autoReconnect = false;
-      this.ws.close();
-      this.ws = null;
+    if (this.socket) {
+      this.socket.disconnect();
+      this.socket = null;
     }
   }
 
@@ -96,51 +89,45 @@ export class WebSocketSignalingChannel
    * @param message The message to send
    */
   send(message: SignalingMessageUnion): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+    if (!this.socket || !this.socket.connected) {
       throw new Error('Signaling channel not connected');
     }
 
-    this.ws.send(JSON.stringify(message));
+    this.socket.emit('message', message);
   }
 
   /**
    * Check if the signaling channel is connected
    */
   isConnected(): boolean {
-    return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+    return this.socket?.connected || false;
   }
 
   /**
    * Set up WebSocket event listeners
    */
   private setupEventListeners(): void {
-    if (!this.ws) return;
+    if (!this.socket) return;
 
-    this.ws.addEventListener('message', (event) => {
-      try {
-        const message = JSON.parse(event.data) as SignalingMessageUnion;
-        this.emit('message', message);
-      } catch (error) {
-        console.error('Failed to parse message:', error);
-      }
+    this.socket.on('message', (message: SignalingMessageUnion) => {
+      this.emit('message', message);
     });
 
-    this.ws.addEventListener('close', () => {
+    this.socket.on('disconnect', () => {
       this.emit('close', undefined);
-      
-      if (this.autoReconnect && this.reconnectAttempts < this.maxReconnectAttempts) {
-        this.reconnectAttempts++;
-        setTimeout(() => {
-          this.connect().catch(error => {
-            console.error('Failed to reconnect:', error);
-          });
-        }, this.reconnectDelay * this.reconnectAttempts);
-      }
     });
 
-    this.ws.addEventListener('error', (error) => {
-      this.emit('error', new Error('WebSocket error'));
+    this.socket.on('error', () => {
+      this.emit('error', new Error('Socket error'));
     });
+  }
+
+  on<K extends keyof SignalingEvents>(event: K, listener: (data: SignalingEvents[K]) => void): () => void {
+    return super.on(event, listener);
+  }
+
+  off<K extends keyof SignalingEvents>(event: K, listener: (data: SignalingEvents[K]) => void): void {
+    super.off(event, listener);
   }
 }
 
@@ -209,5 +196,13 @@ export class MockSignalingChannel
     if (this.connected) {
       this.emit('message', message);
     }
+  }
+
+  on<K extends keyof SignalingEvents>(event: K, listener: (data: SignalingEvents[K]) => void): () => void {
+    return super.on(event, listener);
+  }
+
+  off<K extends keyof SignalingEvents>(event: K, listener: (data: SignalingEvents[K]) => void): void {
+    super.off(event, listener);
   }
 }

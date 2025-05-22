@@ -242,3 +242,28 @@ export type SignalingMessageUnion =
   | ResumeMessage
   | PauseMessage
   | ErrorMessage;
+
+/**
+ * Join response message
+ */
+import { types as mediasoupTypes } from 'mediasoup-client';
+
+export interface JoinResponse extends SignalingMessage {
+  type: SignalingMessageType.JOIN;
+  sendTransportOptions: {
+    id: string;
+    iceParameters: mediasoupTypes.IceParameters;
+    iceCandidates: mediasoupTypes.IceCandidate[];
+    dtlsParameters: mediasoupTypes.DtlsParameters;
+  };
+  recvTransportOptions: {
+    id: string;
+    iceParameters: mediasoupTypes.IceParameters;
+    iceCandidates: mediasoupTypes.IceCandidate[];
+    dtlsParameters: mediasoupTypes.DtlsParameters;
+  };
+  rtpCapabilities: mediasoupTypes.RtpCapabilities;
+  userId: UserId;
+  roomId: RoomId;
+  displayName?: string;
+}

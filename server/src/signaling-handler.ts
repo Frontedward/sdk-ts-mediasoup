@@ -1,85 +1,74 @@
 import { Socket } from 'socket.io';
+import { types as mediasoupTypes } from 'mediasoup';
 import { logger } from './logger';
-import { RoomManager } from './room-manager';
+import { MediasoupManager } from './mediasoup-manager';
 import {
-  SignalingMessageUnion,
   SignalingMessageType,
-  JoinMessage,
-  LeaveMessage,
-  NewProducerMessage,
-  ProducerClosedMessage,
+  SignalingMessageUnion,
   TransportConnectMessage,
   TransportProduceMessage,
   TransportConsumeMessage,
-  ConnectTransportMessage,
   ConsumeMessage,
   ResumeMessage,
-  PauseMessage
+  PauseMessage,
+  JoinMessage,
+  LeaveMessage,
+  JoinResponse
 } from './types';
 
 /**
  * Обработчик сигналинг-сообщений
  */
 export class SignalingHandler {
-  constructor(private roomManager: RoomManager) {}
+  private mediasoupManager: MediasoupManager;
+  private transports: Map<string, mediasoupTypes.WebRtcTransport> = new Map();
+  private producers: Map<string, mediasoupTypes.Producer> = new Map();
+  private consumers: Map<string, mediasoupTypes.Consumer> = new Map();
+
+  constructor() {
+    this.mediasoupManager = new MediasoupManager();
+  }
+
+  async init(): Promise<void> {
+    await this.mediasoupManager.init();
+  }
 
   /**
    * Обработка входящего сообщения
    */
   async handleMessage(socket: Socket, message: SignalingMessageUnion): Promise<void> {
-    logger.debug('Получено сообщение:', message);
-
-    switch (message.type) {
-      case SignalingMessageType.JOIN:
-        await this.handleJoinMessage(socket, message);
-        break;
-
-      case SignalingMessageType.LEAVE:
-        this.handleLeaveMessage(socket, message);
-        break;
-
-      case SignalingMessageType.NEW_PRODUCER:
-        await this.handleNewProducerMessage(socket, message);
-        break;
-
-      case SignalingMessageType.PRODUCER_CLOSED:
-        this.handleProducerClosedMessage(socket, message);
-        break;
-
-      case SignalingMessageType.TRANSPORT_CONNECT:
-        await this.handleTransportConnectMessage(socket, message);
-        break;
-
-      case SignalingMessageType.TRANSPORT_PRODUCE:
-        await this.handleTransportProduceMessage(socket, message);
-        break;
-
-      case SignalingMessageType.TRANSPORT_CONSUME:
-        await this.handleTransportConsumeMessage(socket, message);
-        break;
-
-      case SignalingMessageType.CONNECT_TRANSPORT:
-        await this.handleConnectTransportMessage(socket, message);
-        break;
-
-      case SignalingMessageType.CONSUME:
-        await this.handleConsumeMessage(socket, message);
-        break;
-
-      case SignalingMessageType.RESUME:
-        await this.handleResumeMessage(socket, message);
-        break;
-
-      case SignalingMessageType.PAUSE:
-        await this.handlePauseMessage(socket, message);
-        break;
-
-      default:
-        logger.warn('Неизвестный тип сообщения:', message);
-        socket.emit('message', {
-          type: SignalingMessageType.ERROR,
-          error: 'Неизвестный тип сообщения'
-        });
+    try {
+      switch (message.type) {
+        case SignalingMessageType.JOIN:
+          await this.handleJoinMessage(socket, message);
+          break;
+        case SignalingMessageType.LEAVE:
+          await this.handleLeaveMessage(socket, message);
+          break;
+        case SignalingMessageType.TRANSPORT_CONNECT:
+          await this.handleTransportConnectMessage(socket, message as TransportConnectMessage);
+          break;
+        case SignalingMessageType.TRANSPORT_PRODUCE:
+          await this.handleTransportProduceMessage(socket, message as TransportProduceMessage);
+          break;
+        case SignalingMessageType.TRANSPORT_CONSUME:
+          await this.handleTransportConsumeMessage(socket, message as TransportConsumeMessage);
+          break;
+        case SignalingMessageType.RESUME:
+          await this.handleResumeMessage(socket, message as ResumeMessage);
+          break;
+        case SignalingMessageType.PAUSE:
+          await this.handlePauseMessage(socket, message as PauseMessage);
+          break;
+        default:
+          logger.warn('Unknown message type:', message.type);
+      }
+    } catch (error) {
+      logger.error('Error handling message:', error);
+      socket.emit('message', {
+        type: SignalingMessageType.ERROR,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
     }
   }
 
@@ -87,219 +76,239 @@ export class SignalingHandler {
    * Обработка отключения сокета
    */
   handleDisconnect(socket: Socket): void {
-    // Находим все комнаты, где был этот сокет
-    for (const room of this.roomManager.getAllRooms()) {
-      for (const [userId, participant] of room.participants.entries()) {
-        if (participant.socket.id === socket.id) {
-          this.roomManager.removeParticipant(room.id, userId);
-          break;
-        }
-      }
-    }
+    // Закрываем все транспорты пользователя
+    this.transports.forEach(transport => {
+      transport.close();
+      this.transports.delete(transport.id);
+    });
+    logger.info('Client disconnected:', socket.id);
   }
 
   /**
    * Обработка сообщения о присоединении
    */
-  private async handleJoinMessage(socket: Socket, message: JoinMessage): Promise<void> {
+  async handleJoinMessage(socket: Socket, message: JoinMessage): Promise<void> {
     try {
-      const { roomId, userId, displayName } = message;
+      // Создаем WebRTC транспорты для отправки и получения
+      const sendTransport = await this.mediasoupManager.createWebRtcTransport();
+      const recvTransport = await this.mediasoupManager.createWebRtcTransport();
+      
+      this.transports.set(sendTransport.id, sendTransport);
+      this.transports.set(recvTransport.id, recvTransport);
 
-      // Создаем комнату, если её нет
-      let room = this.roomManager.getRoom(roomId);
-      if (!room) {
-        room = this.roomManager.createRoom(roomId);
-      }
-
-      // Добавляем участника
-      this.roomManager.addParticipant(roomId, socket, userId, displayName);
-
-      // Отправляем подтверждение
-      socket.emit('message', {
+      // Получаем возможности роутера
+      const router = this.mediasoupManager.getRouter();
+      
+      // Отправляем информацию о транспортах клиенту
+      const response: JoinResponse = {
         type: SignalingMessageType.JOIN,
-        roomId,
-        userId,
-        displayName
+        sendTransportOptions: {
+          id: sendTransport.id,
+          iceParameters: sendTransport.iceParameters,
+          iceCandidates: sendTransport.iceCandidates,
+          dtlsParameters: sendTransport.dtlsParameters
+        },
+        recvTransportOptions: {
+          id: recvTransport.id,
+          iceParameters: recvTransport.iceParameters,
+          iceCandidates: recvTransport.iceCandidates,
+          dtlsParameters: recvTransport.dtlsParameters
+        },
+        rtpCapabilities: router.rtpCapabilities,
+        userId: message.userId,
+        roomId: message.roomId,
+        displayName: message.displayName
+      };
+
+      logger.info('Отправляем JOIN response:', {
+        sendTransportId: sendTransport.id,
+        recvTransportId: recvTransport.id,
+        iceParameters: {
+          send: sendTransport.iceParameters,
+          recv: recvTransport.iceParameters
+        },
+        iceCandidates: {
+          send: sendTransport.iceCandidates.length,
+          recv: recvTransport.iceCandidates.length
+        }
+      });
+
+      socket.emit('message', response);
+      logger.info('Client joined:', message.userId);
+
+      // Настраиваем обработчики событий для send транспорта
+      sendTransport.on('dtlsstatechange', (dtlsState) => {
+        logger.info('Send transport dtls state changed to', dtlsState);
+      });
+
+      sendTransport.on('iceselectedtuplechange', (iceSelectedTuple) => {
+        logger.info('Send transport ice selected tuple changed:', iceSelectedTuple);
+      });
+
+      sendTransport.observer.on('close', () => {
+        logger.info('Send transport closed');
+        this.transports.delete(sendTransport.id);
+      });
+
+      // Настраиваем обработчики событий для receive транспорта
+      recvTransport.on('dtlsstatechange', (dtlsState) => {
+        logger.info('Receive transport dtls state changed to', dtlsState);
+      });
+
+      recvTransport.on('iceselectedtuplechange', (iceSelectedTuple) => {
+        logger.info('Receive transport ice selected tuple changed:', iceSelectedTuple);
+      });
+
+      recvTransport.observer.on('close', () => {
+        logger.info('Receive transport closed');
+        this.transports.delete(recvTransport.id);
       });
 
     } catch (error) {
-      logger.error('Ошибка при обработке join:', error);
-      socket.emit('message', {
-        type: SignalingMessageType.ERROR,
-        error: error instanceof Error ? error.message : 'Ошибка при присоединении'
-      });
+      logger.error('Error handling join:', error);
+      throw error;
     }
   }
 
   /**
    * Обработка сообщения о выходе
    */
-  private handleLeaveMessage(socket: Socket, message: LeaveMessage): void {
-    const { roomId, userId } = message;
-    this.roomManager.removeParticipant(roomId, userId);
-  }
-
-  /**
-   * Обработка сообщения о новом producer
-   */
-  private async handleNewProducerMessage(
-    socket: Socket,
-    message: NewProducerMessage
-  ): Promise<void> {
-    const { producerId, userId, kind } = message;
-    const room = this.roomManager.getRoom(message.roomId);
-
-    if (!room) {
-      throw new Error('Комната не найдена');
-    }
-
-    // Оповещаем других участников
-    for (const participant of room.participants.values()) {
-      if (participant.socket.id !== socket.id) {
-        participant.socket.emit('message', {
-          type: SignalingMessageType.NEW_PRODUCER,
-          producerId,
-          userId,
-          kind
-        });
-      }
-    }
-  }
-
-  /**
-   * Обработка сообщения о закрытии producer
-   */
-  private handleProducerClosedMessage(
-    socket: Socket,
-    message: ProducerClosedMessage
-  ): void {
-    const { producerId, userId } = message;
-    const room = this.roomManager.getRoom(message.roomId);
-
-    if (!room) {
-      throw new Error('Комната не найдена');
-    }
-
-    // Оповещаем других участников
-    for (const participant of room.participants.values()) {
-      if (participant.socket.id !== socket.id) {
-        participant.socket.emit('message', {
-          type: SignalingMessageType.PRODUCER_CLOSED,
-          producerId,
-          userId
-        });
-      }
-    }
+  async handleLeaveMessage(socket: Socket, message: LeaveMessage): Promise<void> {
+    // Закрываем все транспорты пользователя
+    this.transports.forEach(transport => {
+      transport.close();
+      this.transports.delete(transport.id);
+    });
+    logger.info('Client left:', message.userId);
   }
 
   /**
    * Обработка сообщения о подключении транспорта
    */
-  private async handleTransportConnectMessage(
-    socket: Socket,
-    message: TransportConnectMessage
-  ): Promise<void> {
-    // Здесь должна быть логика подключения транспорта к mediasoup
-    // Для демо просто отправляем подтверждение
-    socket.emit('message', {
-      type: SignalingMessageType.TRANSPORT_CONNECT,
-      transportId: message.transportId
-    });
+  async handleTransportConnectMessage(socket: Socket, message: TransportConnectMessage): Promise<void> {
+    const transport = this.transports.get(message.transportId);
+    if (!transport) {
+      throw new Error(`Transport not found: ${message.transportId}`);
+    }
+
+    try {
+      logger.info('Connecting transport:', message.transportId);
+      await transport.connect({ dtlsParameters: message.dtlsParameters });
+      
+      // Отправляем подтверждение подключения
+      socket.emit('message', {
+        type: SignalingMessageType.CONNECT_TRANSPORT,
+        transportId: message.transportId,
+        dtlsParameters: message.dtlsParameters
+      });
+      
+      logger.info('Transport connected successfully:', message.transportId);
+    } catch (error) {
+      logger.error('Error connecting transport:', error);
+      throw error;
+    }
   }
 
   /**
    * Обработка сообщения о создании producer
    */
-  private async handleTransportProduceMessage(
-    socket: Socket,
-    message: TransportProduceMessage
-  ): Promise<void> {
-    // Здесь должна быть логика создания producer в mediasoup
-    // Для демо просто отправляем подтверждение
-    socket.emit('message', {
-      type: SignalingMessageType.TRANSPORT_PRODUCE,
-      transportId: message.transportId,
-      kind: message.kind
-    });
-  }
+  async handleTransportProduceMessage(socket: Socket, message: TransportProduceMessage): Promise<void> {
+    const transport = this.transports.get(message.transportId);
+    if (!transport) {
+      throw new Error(`Transport not found: ${message.transportId}`);
+    }
 
-  /**
-   * Обработка сообщения о создании consumer
-   */
-  private async handleTransportConsumeMessage(
-    socket: Socket,
-    message: TransportConsumeMessage
-  ): Promise<void> {
-    // Здесь должна быть логика создания consumer в mediasoup
-    // Для демо просто отправляем подтверждение
-    socket.emit('message', {
-      type: SignalingMessageType.TRANSPORT_CONSUME,
-      transportId: message.transportId,
-      producerId: message.producerId
-    });
-  }
-
-  /**
-   * Обработка сообщения о подключении транспорта
-   */
-  private async handleConnectTransportMessage(
-    socket: Socket,
-    message: ConnectTransportMessage
-  ): Promise<void> {
-    // Здесь должна быть логика подключения транспорта к mediasoup
-    // Для демо просто отправляем подтверждение
-    socket.emit('message', {
-      type: SignalingMessageType.CONNECT_TRANSPORT,
-      transportId: message.transportId
-    });
-  }
-
-  /**
-   * Обработка сообщения о создании consumer
-   */
-  private async handleConsumeMessage(
-    socket: Socket,
-    message: ConsumeMessage
-  ): Promise<void> {
-    // Здесь должна быть логика создания consumer в mediasoup
-    // Для демо просто отправляем подтверждение
-    socket.emit('message', {
-      type: SignalingMessageType.CONSUME,
-      consumerId: message.consumerId,
-      producerId: message.producerId,
+    const producer = await transport.produce({
       kind: message.kind,
       rtpParameters: message.rtpParameters,
-      userId: message.userId
+      appData: message.appData
     });
+
+    this.producers.set(producer.id, producer);
+    
+    producer.on('transportclose', () => {
+      this.producers.delete(producer.id);
+    });
+
+    // Отправляем ID producer'а обратно клиенту
+    socket.emit('message', {
+      type: SignalingMessageType.TRANSPORT_PRODUCE,
+      id: producer.id,
+      producerId: producer.id,
+      kind: producer.kind
+    });
+
+    // Оповещаем всех в комнате о новом producer
+    socket.broadcast.emit('message', {
+      type: SignalingMessageType.NEW_PRODUCER,
+      producerId: producer.id,
+      kind: producer.kind
+    });
+
+    logger.info('Producer created:', producer.id);
+  }
+
+  /**
+   * Обработка сообщения о создании consumer
+   */
+  async handleTransportConsumeMessage(socket: Socket, message: TransportConsumeMessage): Promise<void> {
+    const transport = this.transports.get(message.transportId);
+    if (!transport) {
+      throw new Error(`Transport not found: ${message.transportId}`);
+    }
+
+    const producer = this.producers.get(message.producerId);
+    if (!producer) {
+      throw new Error(`Producer not found: ${message.producerId}`);
+    }
+
+    const consumer = await transport.consume({
+      producerId: producer.id,
+      rtpCapabilities: message.rtpCapabilities,
+      paused: true
+    });
+
+    this.consumers.set(consumer.id, consumer);
+
+    consumer.on('transportclose', () => {
+      this.consumers.delete(consumer.id);
+    });
+
+    socket.emit('message', {
+      type: SignalingMessageType.CONSUME,
+      id: consumer.id,
+      producerId: producer.id,
+      kind: consumer.kind,
+      rtpParameters: consumer.rtpParameters
+    });
+
+    await consumer.resume();
+    logger.info('Consumer created:', consumer.id);
   }
 
   /**
    * Обработка сообщения о возобновлении consumer
    */
-  private async handleResumeMessage(
-    socket: Socket,
-    message: ResumeMessage
-  ): Promise<void> {
-    // Здесь должна быть логика возобновления consumer в mediasoup
-    // Для демо просто отправляем подтверждение
-    socket.emit('message', {
-      type: SignalingMessageType.RESUME,
-      consumerId: message.consumerId
-    });
+  async handleResumeMessage(socket: Socket, message: ResumeMessage): Promise<void> {
+    const consumer = this.consumers.get(message.consumerId);
+    if (!consumer) {
+      throw new Error(`Consumer not found: ${message.consumerId}`);
+    }
+
+    await consumer.resume();
+    logger.info('Consumer resumed:', message.consumerId);
   }
 
   /**
    * Обработка сообщения о паузе consumer
    */
-  private async handlePauseMessage(
-    socket: Socket,
-    message: PauseMessage
-  ): Promise<void> {
-    // Здесь должна быть логика паузы consumer в mediasoup
-    // Для демо просто отправляем подтверждение
-    socket.emit('message', {
-      type: SignalingMessageType.PAUSE,
-      consumerId: message.consumerId
-    });
+  async handlePauseMessage(socket: Socket, message: PauseMessage): Promise<void> {
+    const consumer = this.consumers.get(message.consumerId);
+    if (!consumer) {
+      throw new Error(`Consumer not found: ${message.consumerId}`);
+    }
+
+    await consumer.pause();
+    logger.info('Consumer paused:', message.consumerId);
   }
 } 

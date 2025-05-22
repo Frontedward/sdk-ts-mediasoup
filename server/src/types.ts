@@ -199,6 +199,7 @@ export interface ErrorMessage extends SignalingMessage {
  */
 export type SignalingMessageUnion =
   | JoinMessage
+  | JoinResponse
   | LeaveMessage
   | NewProducerMessage
   | ProducerClosedMessage
@@ -209,4 +210,31 @@ export type SignalingMessageUnion =
   | ConsumeMessage
   | ResumeMessage
   | PauseMessage
-  | ErrorMessage; 
+  | ErrorMessage;
+
+export interface TransportOptions {
+  id: string;
+  iceParameters: mediasoupTypes.IceParameters;
+  iceCandidates: mediasoupTypes.IceCandidate[];
+  dtlsParameters: mediasoupTypes.DtlsParameters;
+}
+
+export interface JoinResponse extends SignalingMessage {
+  type: SignalingMessageType.JOIN;
+  sendTransportOptions: {
+    id: string;
+    iceParameters: mediasoupTypes.IceParameters;
+    iceCandidates: mediasoupTypes.IceCandidate[];
+    dtlsParameters: mediasoupTypes.DtlsParameters;
+  };
+  recvTransportOptions: {
+    id: string;
+    iceParameters: mediasoupTypes.IceParameters;
+    iceCandidates: mediasoupTypes.IceCandidate[];
+    dtlsParameters: mediasoupTypes.DtlsParameters;
+  };
+  rtpCapabilities: mediasoupTypes.RtpCapabilities;
+  userId: UserId;
+  roomId: RoomId;
+  displayName?: string;
+} 
