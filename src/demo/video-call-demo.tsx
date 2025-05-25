@@ -243,25 +243,39 @@ const CallInterface: React.FC<CallInterfaceProps> = observer(({ store, onLeave }
       
       {/* Controls */}
       <div className="bg-white shadow-sm rounded-lg p-4">
-        <div className="flex justify-center space-x-4">
+        <div className="flex flex-wrap justify-center gap-2 w-full">
           <button
             onClick={() => store.toggleAudio()}
-            className={`rounded-full p-4 focus:outline-none focus:ring-2 focus:ring-offset-2 transition ${
+            className={`flex-1 min-w-[120px] rounded-full p-4 focus:outline-none focus:ring-2 focus:ring-offset-2 transition ${
               store.localAudioEnabled ? 'bg-blue-100 text-blue-500 hover:bg-blue-200 focus:ring-blue-500' : 'bg-red-100 text-red-500 hover:bg-red-200 focus:ring-red-500'
             }`}
             title={store.localAudioEnabled ? 'Mute microphone' : 'Unmute microphone'}
           >
-            {store.localAudioEnabled ? <Mic size={24} /> : <MicOff size={24} />}
+            <div className="flex items-center justify-center">
+              {store.localAudioEnabled ? <Mic size={24} /> : <MicOff size={24} />}
+            </div>
           </button>
           
           <button
             onClick={() => store.toggleVideo()}
-            className={`rounded-full p-4 focus:outline-none focus:ring-2 focus:ring-offset-2 transition ${
+            className={`flex-1 min-w-[120px] rounded-full p-4 focus:outline-none focus:ring-2 focus:ring-offset-2 transition ${
               store.localVideoEnabled ? 'bg-blue-100 text-blue-500 hover:bg-blue-200 focus:ring-blue-500' : 'bg-red-100 text-red-500 hover:bg-red-200 focus:ring-red-500'
             }`}
             title={store.localVideoEnabled ? 'Turn off camera' : 'Turn on camera'}
           >
-            {store.localVideoEnabled ? <Video size={24} /> : <VideoOff size={24} />}
+            <div className="flex items-center justify-center">
+              {store.localVideoEnabled ? <Video size={24} /> : <VideoOff size={24} />}
+            </div>
+          </button>
+          
+          <button
+            onClick={onLeave}
+            className="flex-1 min-w-[120px] bg-red-500 hover:bg-red-600 text-white rounded-full p-4 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 transition"
+            title="Leave call"
+          >
+            <div className="flex items-center justify-center">
+              <Phone size={24} className="transform rotate-135" />
+            </div>
           </button>
         </div>
       </div>

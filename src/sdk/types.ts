@@ -231,6 +231,7 @@ export interface ErrorMessage extends SignalingMessage {
  */
 export type SignalingMessageUnion = 
   | JoinMessage
+  | JoinResponse
   | LeaveMessage
   | NewProducerMessage
   | ProducerClosedMessage

@@ -3,40 +3,90 @@ import { observer } from 'mobx-react-lite';
 import { VideoCallClient } from '../sdk/video-call-client';
 import { ConnectionStatus, Participant } from '../sdk/types';
 import { CallStore } from '../sdk/store/call-store';
+import { MockSignalingChannel } from '../sdk/signaling/signaling-channel';
 
 // Компонент для отображения видео участника
-const ParticipantView: React.FC<{ participant: Participant }> = ({ participant }) => {
+const ParticipantView: React.FC<{ participant: Participant; client: VideoCallClient }> = observer(({ participant, client }) => {
   const videoRef = React.useRef<HTMLVideoElement>(null);
+  const currentUserId = client.getCurrentUserId();
 
   useEffect(() => {
-    const videoTrack = Object.values(participant.consumers)
-      .find(consumer => consumer.type === 'video')?.track;
-
-    if (videoTrack && videoRef.current) {
-      videoRef.current.srcObject = new MediaStream([videoTrack]);
+    // Для локального пользователя показываем реальное видео
+    if (participant.userId === currentUserId) {
+      const videoTrack = client.getDeviceManager().getVideoTrack();
+      if (videoTrack && videoRef.current) {
+        videoRef.current.srcObject = new MediaStream([videoTrack]);
+      } else if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+      return;
     }
-  }, [participant.consumers]);
+
+    // Для удаленных участников в mock режиме показываем заглушку
+    // В реальном режиме здесь будут consumers
+    const videoConsumer = Object.values(participant.consumers)
+      .find(consumer => consumer.type === 'video');
+    
+    if (videoConsumer?.track && videoRef.current) {
+      videoRef.current.srcObject = new MediaStream([videoConsumer.track]);
+    } else if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  }, [participant.consumers, participant.producers, participant.userId, currentUserId, client]);
+
+  // Проверяем, есть ли видео
+  const isLocalUser = participant.userId === currentUserId;
+  const hasLocalVideo = isLocalUser && client.getDeviceManager().getVideoTrack();
+  const hasRemoteVideo = !isLocalUser && Object.values(participant.producers).some(p => p.type === 'video');
+  
+
+
+  // Для локального пользователя добавляем индикатор
+  const displayName = isLocalUser 
+    ? `${participant.displayName || participant.userId} (Вы)` 
+    : (participant.displayName || participant.userId);
 
   return (
-    <div className="participant-view">
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        muted={participant.userId === 'local'}
-        className="w-full h-full object-cover rounded-lg"
-      />
-      <div className="participant-info">
-        {participant.displayName || participant.userId}
+    <div className="aspect-video bg-gray-800 rounded-lg overflow-hidden relative">
+      {(hasLocalVideo || hasRemoteVideo) ? (
+        <>
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted={isLocalUser}
+            className="w-full h-full object-cover"
+          />
+          {/* Для удаленных участников в mock режиме показываем заглушку поверх видео */}
+          {!isLocalUser && (
+            <div className="absolute inset-0 bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center">
+              <div className="text-center text-white">
+                <div className="text-6xl mb-4">📹</div>
+                <div className="text-lg font-semibold">Видео участника</div>
+                <div className="text-sm opacity-75">(Mock режим)</div>
+              </div>
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="w-full h-full flex items-center justify-center text-white">
+          <div className="text-center">
+            <div className="text-4xl mb-2">👤</div>
+            <div>Нет видео</div>
+          </div>
+        </div>
+      )}
+      <div className="absolute bottom-2 left-2 text-white bg-black bg-opacity-50 px-2 py-1 rounded">
+        {displayName}
       </div>
     </div>
   );
-};
+});
 
 // Основной компонент демо
 export const VideoCallDemo: React.FC = observer(() => {
   const client = useMemo(() => new VideoCallClient({
-    signalingUrl: 'ws://localhost:3001',
+    signalingChannel: new MockSignalingChannel(),
     autoReconnect: true,
     useSimulcast: false
   }), []);
@@ -140,34 +190,12 @@ export const VideoCallDemo: React.FC = observer(() => {
 
       {/* Сетка участников */}
       <div className="grid grid-cols-2 gap-4">
-        {/* Локальное видео */}
-        {store.localVideoEnabled && (
-          <div className="aspect-video bg-gray-800 rounded-lg overflow-hidden">
-            <video
-              ref={(el) => {
-                if (el) {
-                  const videoTrack = client.getDeviceManager().getVideoTrack();
-                  if (videoTrack) {
-                    el.srcObject = new MediaStream([videoTrack]);
-                  }
-                }
-              }}
-              autoPlay
-              playsInline
-              muted
-              className="w-full h-full object-cover"
-            />
-            <div className="absolute bottom-2 left-2 text-white bg-black bg-opacity-50 px-2 py-1 rounded">
-              Вы (локально)
-            </div>
-          </div>
-        )}
-
-        {/* Удаленные участники */}
+        {/* Все участники (включая локального) */}
         {Object.values(store.participants).map((participant) => (
           <ParticipantView
             key={participant.userId}
             participant={participant}
+            client={client}
           />
         ))}
       </div>

@@ -24,7 +24,7 @@ export class CallStore {
   currentUserId: UserId | null = null;
   
   // Media state
-  localVideoEnabled: boolean = true;
+  localVideoEnabled: boolean = false;
   localAudioEnabled: boolean = true;
   
   // Client reference
@@ -52,16 +52,30 @@ export class CallStore {
   updateRoomState = action(() => {
     this.currentRoom = this.client.getCurrentRoom();
     this.currentUserId = this.client.getCurrentUserId();
+    
+
   });
 
-  toggleVideo = action(() => {
+  toggleVideo = action(async () => {
     this.localVideoEnabled = !this.localVideoEnabled;
-    // Здесь должна быть логика включения/выключения видео через client
+    try {
+      await this.client.enableVideo(this.localVideoEnabled);
+    } catch (error) {
+      console.error('Error toggling video:', error);
+      // Revert the state if there was an error
+      this.localVideoEnabled = !this.localVideoEnabled;
+    }
   });
 
-  toggleAudio = action(() => {
+  toggleAudio = action(async () => {
     this.localAudioEnabled = !this.localAudioEnabled;
-    // Здесь должна быть логика включения/выключения аудио через client
+    try {
+      await this.client.enableAudio(this.localAudioEnabled);
+    } catch (error) {
+      console.error('Error toggling audio:', error);
+      // Revert the state if there was an error
+      this.localAudioEnabled = !this.localAudioEnabled;
+    }
   });
 
   /**
