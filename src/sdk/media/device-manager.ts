@@ -1,5 +1,5 @@
 /**
- * Manages media devices and streams
+ * Управляет медиа устройствами и потоками
  */
 
 export type MediaConstraints = MediaStreamConstraints;

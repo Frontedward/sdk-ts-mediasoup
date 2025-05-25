@@ -99,19 +99,18 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
    * Join a video call
    * @param roomId Room ID to join
    * @param userId User ID to use
-   * @param displayName Optional display name
    * @returns Promise that resolves when joined
    */
-  async joinCall(roomId: RoomId, userId: UserId, displayName?: string): Promise<void> {
+  async joinCall(roomId: RoomId, userId: UserId): Promise<void> {
     try {
       this.setConnectionStatus(ConnectionStatus.CONNECTING);
       
-      // Connect to signaling server if not already connected
+      // Подключаемся к сигнальному серверу, если еще не подключены
       if (!this.signalingChannel.isConnected()) {
         await this.signalingChannel.connect();
       }
       
-      // Store user and room info
+      // Сохраняем информацию о пользователе и комнате
       this.currentUserId = userId;
       this.currentRoom = {
         id: roomId,
@@ -119,7 +118,7 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
         createdAt: new Date()
       };
       
-      // Initialize media device
+      // Инициализируем медиа устройство
       await this.deviceManager.getUserMedia({ audio: true, video: false });
       
       // В mock режиме обрабатываем подключение синхронно
@@ -131,7 +130,7 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
           type: SignalingMessageType.JOIN,
           roomId,
           userId,
-          displayName
+          displayName: userId // Используем userId как displayName по умолчанию
         });
         
         // В mock режиме соединение уже установлено
@@ -150,7 +149,7 @@ export class VideoCallClient extends SimpleEventEmitter<VideoCallEvents> {
           type: SignalingMessageType.JOIN,
           roomId,
           userId,
-          displayName
+          displayName: userId // Используем userId как displayName по умолчанию
         });
         
         const timeout = setTimeout(() => {

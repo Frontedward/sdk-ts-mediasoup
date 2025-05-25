@@ -1,5 +1,5 @@
 /**
- * Common types used throughout the SDK
+ * Общие типы, используемые в SDK
  */
 
 export type RoomId = string;
@@ -9,7 +9,7 @@ export type ConsumerId = string;
 export type TransportId = string;
 
 /**
- * Connection status for the video call
+ * Статус соединения для видеозвонка
  */
 export enum ConnectionStatus {
   DISCONNECTED = 'disconnected',
@@ -20,7 +20,7 @@ export enum ConnectionStatus {
 }
 
 /**
- * Participant in a video call
+ * Участник видеозвонка
  */
 export interface Participant {
   userId: UserId;
@@ -31,7 +31,7 @@ export interface Participant {
 }
 
 /**
- * Producer for local media
+ * Producer для локальных медиа
  */
 export interface Producer {
   id: ProducerId;
@@ -42,7 +42,7 @@ export interface Producer {
 }
 
 /**
- * Consumer for remote media
+ * Consumer для удаленных медиа
  */
 export interface Consumer {
   id: ConsumerId;
@@ -54,7 +54,7 @@ export interface Consumer {
 }
 
 /**
- * Room information
+ * Информация о комнате
  */
 export interface Room {
   id: RoomId;
@@ -63,7 +63,7 @@ export interface Room {
 }
 
 /**
- * Error types that can occur in the SDK
+ * Типы ошибок, которые могут возникнуть в SDK
  */
 export enum ErrorType {
   CONNECTION = 'connection',
@@ -75,7 +75,7 @@ export enum ErrorType {
 }
 
 /**
- * SDK specific error class
+ * Специфичный для SDK класс ошибок
  */
 export class VideoCallError extends Error {
   type: ErrorType;
@@ -88,7 +88,7 @@ export class VideoCallError extends Error {
 }
 
 /**
- * Signaling message types
+ * Типы сигнальных сообщений
  */
 export enum SignalingMessageType {
   JOIN = 'join',

@@ -99,7 +99,7 @@ export const VideoCallDemo: React.FC = observer(() => {
   // Подключение к звонку
   const handleJoin = async () => {
     try {
-      await client.joinCall(roomId, userId, displayName);
+      await client.joinCall(roomId, userId);
     } catch (error) {
       console.error('Ошибка подключения:', error);
     }

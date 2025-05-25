@@ -15,19 +15,19 @@ import { VideoCallClient } from '../video-call-client';
  * MobX store for video call state
  */
 export class CallStore {
-  // Connection state
+  // Состояние соединения
   connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED;
   error: VideoCallError | null = null;
   
-  // Room state
+  // Состояние комнаты
   currentRoom: Room | null = null;
   currentUserId: UserId | null = null;
   
-  // Media state
+  // Состояние медиа
   localVideoEnabled: boolean = false;
   localAudioEnabled: boolean = true;
   
-  // Client reference
+  // Ссылка на клиент
   private client: VideoCallClient;
 
   /**
@@ -40,7 +40,7 @@ export class CallStore {
     makeAutoObservable(this);
   }
 
-  // Actions
+  // Действия
   setConnectionStatus = action((status: ConnectionStatus) => {
     this.connectionStatus = status;
   });
@@ -82,12 +82,11 @@ export class CallStore {
    * Join a call
    * @param roomId The room ID to join
    * @param userId The user ID to use
-   * @param displayName Optional display name
    */
-  async joinCall(roomId: RoomId, userId: UserId, displayName?: string): Promise<void> {
+  async joinCall(roomId: RoomId, userId: UserId): Promise<void> {
     try {
       this.error = null;
-      await this.client.joinCall(roomId, userId, displayName);
+      await this.client.joinCall(roomId, userId);
     } catch (error) {
       if (error instanceof VideoCallError) {
         this.error = error;

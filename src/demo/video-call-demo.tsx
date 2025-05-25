@@ -36,7 +36,7 @@ const VideoCallDemo: React.FC = observer(() => {
     try {
       setIsJoining(true);
       setErrorMessage(null);
-      await store.joinCall(roomId, userId, displayName);
+      await store.joinCall(roomId, userId);
     } catch (error) {
       setErrorMessage(`Failed to join call: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
